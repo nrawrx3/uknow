@@ -4,10 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime"
 	"sort"
 )
 
 var Logger = log.Default()
+
+func LogInfo(format string, args ...interface{}) {
+	pc := make([]uintptr, 15)
+	n := runtime.Callers(2, pc)
+	frames := runtime.CallersFrames(pc[:n])
+	frame, _ := frames.Next()
+
+	format = fmt.Sprintf("%s:%d:%s> ", frame.File, frame.Line, frame.Function) + format
+	Logger.Printf(format, args...)
+}
 
 type Card struct {
 	Number Number
@@ -186,17 +197,16 @@ func NewTable(localPlayerName string) *Table {
 	}
 
 	table.HandOfPlayer = make(map[string]Deck)
-	table.HandOfPlayer[localPlayerName] = NewEmptyDeck()
 	table.IndexOfPlayer = make(map[string]int)
-	table.IndexOfPlayer[localPlayerName] = 0
 	table.PlayerNames = make([]string, 0, 16)
-	table.PlayerNames = append(table.PlayerNames, localPlayerName)
+
 	table.LocalPlayerName = localPlayerName
+	table.AddPlayer(localPlayerName)
 
 	return table
 }
 
-func (t *Table) AddNewPlayer(playerName string) error {
+func (t *Table) AddPlayer(playerName string) error {
 	for _, existingName := range t.PlayerNames {
 		if existingName == playerName {
 			return errors.New("Existing player has same name as to-be-added player")
