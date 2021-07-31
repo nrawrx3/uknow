@@ -14,11 +14,12 @@ func _() {
 	_ = x[CmdQuit-4]
 	_ = x[CmdChallenge-5]
 	_ = x[CmdConnect-6]
+	_ = x[CmdTableInfo-7]
 }
 
-const _CommandKind_name = "CmdDropCardCmdDrawCardCmdDrawCardFromPileCmdQuitCmdChallengeCmdConnect"
+const _CommandKind_name = "CmdDropCardCmdDrawCardCmdDrawCardFromPileCmdQuitCmdChallengeCmdConnectCmdTableInfo"
 
-var _CommandKind_index = [...]uint8{0, 11, 22, 41, 48, 60, 70}
+var _CommandKind_index = [...]uint8{0, 11, 22, 41, 48, 60, 70, 82}
 
 func (i CommandKind) String() string {
 	i -= 1

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/rpc"
-	"os"
 	"regexp"
 	"sync"
 	_ "time"
@@ -31,7 +30,7 @@ type uiAction int
 const (
 	uiDrawn uiAction = iota
 	uiRedraw
-	uiClear
+	uiClearRedraw
 	uiStop
 )
 
@@ -69,21 +68,25 @@ type Console struct {
 	lastCommandFinished chan struct{}
 }
 
-type ConsoleLog struct {
-	c *Console
-}
-
-func (clog *ConsoleLog) Write(bytes []byte) (int, error) {
-	clog.c.appendEventLog(string(bytes[:]))
-	return len(bytes), nil
+func (c *Console) notifyRedrawUI(uiAction uiAction, exec func()) {
+	c.uiActionCond.L.Lock()
+	defer c.uiActionCond.L.Unlock()
+	c.uiAction = uiAction
+	exec()
+	c.uiActionCond.Signal()
 }
 
 // The whole application state is in this global.
 var c Console
 
 func (c *Console) startServer() {
+	c.rpcClientOfPlayer = make(map[string]*rpc.Client)
+	c.remoteAddrOfPlayer = make(map[string]string)
+
 	c.rpcServer = rpc.NewServer()
-	c.rpcServer.RegisterName("Console", &c)
+	if err := c.rpcServer.RegisterName("Console", c); err != nil {
+		uknow.Logger.Fatalf("Failed to register Console as an RPC service: %s", err)
+	}
 	var err error
 	c.listener, err = net.Listen("tcp", ":0")
 	if err != nil {
@@ -99,10 +102,10 @@ func (c *Console) startServer() {
 		for {
 			conn, err := c.listener.Accept()
 			if err != nil {
-				uknow.LogInfo("accept error: %s", err)
+				uknow.LogInfo("Accept error: %s", err)
 			}
 
-			uknow.LogInfo("Received new connection: %s", conn.RemoteAddr)
+			uknow.LogInfo("Received new connection: %s", conn.RemoteAddr())
 
 			c.liveConnsWaitGroup.Add(1)
 			go func() {
@@ -143,6 +146,9 @@ func (c *Console) executeCommand(command uknow.InputCommand) error {
 			return err
 		}
 
+	case uknow.CmdTableInfo:
+		c.printTableInfo()
+
 	default:
 		uknow.LogInfo("Unimplemented command: %s", command)
 		c.appendEventLog(fmt.Sprintf("Unimplemented command: %v", command))
@@ -152,27 +158,29 @@ func (c *Console) executeCommand(command uknow.InputCommand) error {
 }
 
 func (c *Console) appendEventLog(line string) {
-	c.uiActionCond.L.Lock()
-	defer c.uiActionCond.L.Unlock()
-	c.eventLogCell.Text = fmt.Sprintf("%s\n%s", c.eventLogCell.Text, line)
-	uknow.Logger.Println(line)
-	c.uiAction = uiRedraw
-	c.uiActionCond.Signal()
+	c.notifyRedrawUI(uiRedraw, func() {
+		c.eventLogCell.Text = fmt.Sprintf("%s\n%s", c.eventLogCell.Text, line)
+		uknow.Logger.Println(line)
+	})
+}
+
+type ConsoleLogger struct {
+	c *Console
+}
+
+func (cl *ConsoleLogger) Write(p []byte) (int, error) {
+	c.appendEventLog(string(p))
+	return len(p), nil
 }
 
 func (c *Console) appendCommandPrompt(s string) {
 	c.commandPromptMutex.Lock()
 	defer c.commandPromptMutex.Unlock()
 	c.commandStringBeingTyped += s
-
 	uknow.Logger.Printf("c.commandStringBeintTyped = %s\n", c.commandStringBeingTyped)
-
-	c.uiActionCond.L.Lock()
-	defer c.uiActionCond.L.Unlock()
-	c.commandPromptCell.Text = fmt.Sprintf(" %s_", c.commandStringBeingTyped)
-	c.uiAction = uiRedraw
-	uknow.Logger.Printf("Set ui action to Redraw\n")
-	c.uiActionCond.Signal()
+	c.notifyRedrawUI(uiRedraw, func() {
+		c.commandPromptCell.Text = fmt.Sprintf(" %s_", c.commandStringBeingTyped)
+	})
 }
 
 func (c *Console) backspaceCommandPrompt() {
@@ -184,35 +192,48 @@ func (c *Console) backspaceCommandPrompt() {
 	}
 	c.commandHistoryIndex = maxInt(0, len(c.commandHistory)-1)
 
-	c.uiActionCond.L.Lock()
-	c.commandPromptCell.Text = fmt.Sprintf(" %s_", c.commandStringBeingTyped)
-	c.uiAction = uiRedraw
-	c.uiActionCond.L.Unlock()
-	c.uiActionCond.Signal()
+	c.notifyRedrawUI(uiRedraw, func() {
+		c.commandPromptCell.Text = fmt.Sprintf(" %s_", c.commandStringBeingTyped)
+	})
 }
 
+// DOES NOT LOCK commandPromptMutex
 func (c *Console) resetCommandPrompt(text string, addCurrentTextToHistory bool) {
 	c.commandStringBeingTyped = text
 	if addCurrentTextToHistory {
 		c.commandHistory = append(c.commandHistory, c.commandStringBeingTyped)
 		c.commandHistoryIndex = len(c.commandHistory) - 1
 	}
-	c.uiActionCond.L.Lock()
-	c.commandPromptCell.Text = fmt.Sprintf(" %s_", text)
-	c.uiAction = uiRedraw
-	c.uiActionCond.L.Unlock()
-	c.uiActionCond.Signal()
+
+	c.notifyRedrawUI(uiRedraw, func() {
+		c.commandPromptCell.Text = fmt.Sprintf(" %s_", text)
+	})
 }
 
-func (c *Console) refillHandcountChart() {
-	c.uiActionCond.L.Lock()
-	defer c.uiActionCond.L.Unlock()
-	for i, playerName := range c.table.PlayerNames {
-		c.handCountChart.Labels[i] = playerName
-		c.handCountChart.Data[i] = float64(len(c.table.HandOfPlayer[playerName]))
+func (c *Console) printTableInfo() {
+	handCounts := make(map[string]int)
+	for playerName, hand := range c.table.HandOfPlayer {
+		handCounts[playerName] = len(hand)
 	}
-	c.uiAction = uiRedraw
-	c.uiActionCond.Signal()
+
+	msg := fmt.Sprintf(`
+Players:	%+v,
+Hand counts:	%+v,
+DrawDeck count: %+v,
+DiscardPile count: %+v`,
+		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
+	c.appendEventLog(msg)
+	uknow.Logger.Printf(msg)
+}
+
+// DOES NOT LOCK stateMutex
+func (c *Console) refillHandcountChart() {
+	c.notifyRedrawUI(uiRedraw, func() {
+		for i, playerName := range c.table.PlayerNames {
+			c.handCountChart.Labels[i] = playerName
+			c.handCountChart.Data[i] = float64(len(c.table.HandOfPlayer[playerName]))
+		}
+	})
 }
 
 type RPCBaseArgs struct {
@@ -228,13 +249,16 @@ func (c *Console) getRPCBaseArgs() RPCBaseArgs {
 }
 
 type AddPlayerArgs struct {
-	RPCBaseArgs
-
+	// RPCBaseArgs
+	CallerPlayerName   string            // name of the caller/replier player
+	CallerRemoteAddr   string            // address at which the caller/replier player is serving RPC requests
 	RemoteAddrOfPlayer map[string]string // read by callee to connect to already existing players that it has not connected to
 }
 
 type AddPlayerReply struct {
-	RPCBaseArgs
+	// RPCBaseArgs
+	CallerPlayerName   string            // name of the caller/replier player
+	CallerRemoteAddr   string            // address at which the caller/replier player is serving RPC requests
 	RemoteAddrOfPlayer map[string]string // read by caller to connect to already existing players that it has not connected to
 }
 
@@ -242,8 +266,18 @@ type AddPlayerReply struct {
 // with the currently available players in the cluster so that the caller can call AddPlayer on each of these
 // also.
 func (c *Console) AddPlayer(args AddPlayerArgs, reply *AddPlayerReply) error {
+	// Avoid connecting to self
+	if args.CallerPlayerName == c.table.LocalPlayerName {
+		c.appendEventLog("Cannot connect to self.")
+		return fmt.Errorf("Player %s cannot connect to self", args.CallerPlayerName)
+	}
+
 	c.stateMutex.Lock()
 	defer c.stateMutex.Unlock()
+
+	uknow.Logger.Printf("AddPlayer running")
+
+	c.appendEventLog(fmt.Sprintf("Received AddPlayer call from %+v", args.CallerPlayerName))
 
 	_, exists := c.table.IndexOfPlayer[args.CallerPlayerName]
 	if exists {
@@ -288,6 +322,8 @@ func (c *Console) connectToKnownPlayers(remoteAddrOfPlayer map[string]string) er
 }
 
 func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
+	uknow.Logger.Printf("connectToPeer %s...", addr)
+
 	// Check if we already have a connection open to this peer. This shouldn't happen.
 	for _, remoteAddr := range c.remoteAddrOfPlayer {
 		if remoteAddr == addr {
@@ -304,10 +340,10 @@ func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
 	}
 
 	// Don't know the name of the peer yet. We will obtain it from the reply of the AddPlayer RPC.
-
 	args := AddPlayerArgs{
-		c.getRPCBaseArgs(),
-		c.remoteAddrOfPlayer,
+		CallerPlayerName:   c.table.LocalPlayerName,
+		CallerRemoteAddr:   c.listener.Addr().String(),
+		RemoteAddrOfPlayer: c.remoteAddrOfPlayer,
 	}
 	var reply AddPlayerReply
 	if err := rpcClient.Call("Console.AddPlayer", args, &reply); err != nil {
@@ -316,6 +352,7 @@ func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
 	}
 
 	c.table.AddPlayer(reply.CallerPlayerName)
+
 	c.remoteAddrOfPlayer[reply.CallerPlayerName] = addr
 	c.rpcClientOfPlayer[reply.CallerPlayerName] = rpcClient
 
@@ -385,9 +422,11 @@ func main() {
 			ui.NewCol(1.0, c.commandPromptCell)),
 	)
 
-	c.startServer()
+	uknow.Logger = createFileLogger(true)
 
-	uknow.Logger = log.New(os.Stderr, "", log.Ltime)
+	// uknow.Logger = log.New(&ConsoleLogger{c: &c}, localPlayerName, log.Lshortfile|log.Ltime)
+
+	c.startServer()
 
 	go func() {
 		defer func() {
@@ -406,13 +445,17 @@ func main() {
 					c.uiAction = uiStop
 					c.uiActionCond.L.Unlock()
 					c.uiActionCond.Signal()
+
+					c.notifyRedrawUI(uiStop, func() {})
 				case "<Resize>":
-					c.uiActionCond.L.Lock()
-					c.uiAction = uiClear
 					payload := e.Payload.(ui.Resize)
-					c.grid.SetRect(0, 0, payload.Width, payload.Height)
+					c.uiActionCond.L.Lock()
 					c.uiActionCond.L.Unlock()
 					c.uiActionCond.Signal()
+
+					c.notifyRedrawUI(uiRedraw, func() {
+						c.grid.SetRect(0, 0, payload.Width, payload.Height)
+					})
 				case "<Enter>":
 					c.executeCommandCell()
 				case "<Space>":
@@ -470,8 +513,9 @@ func main() {
 		case uiStop:
 			c.uiActionCond.L.Unlock()
 			return
-		case uiClear:
+		case uiClearRedraw:
 			ui.Clear()
+			ui.Render(c.grid)
 			c.uiAction = uiDrawn
 		case uiRedraw:
 			uknow.Logger.Printf("Redrawing UI")

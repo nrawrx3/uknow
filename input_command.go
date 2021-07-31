@@ -19,6 +19,7 @@ const (
 	CmdQuit
 	CmdChallenge
 	CmdConnect
+	CmdTableInfo
 )
 
 type InputCommand struct {
@@ -42,6 +43,7 @@ func NewInputCommand() InputCommand {
 //	drop NUMBER COLOR (NUMBER COLOR)*        (where NUMBER can denote or action name or action name)
 //	quit                     (quit the game??)
 //	challenge NAME           (where NAME is name of player whom to challenge)
+//	table_info
 
 func ParseCommandFromInput(input string) (InputCommand, error) {
 	input = strings.TrimSpace(input)
@@ -127,6 +129,10 @@ func parseCommand(s *scanner.Scanner, tok rune) (rune, InputCommand, error) {
 			return tok, command, fmt.Errorf("Expected name of person to challenge")
 		}
 		command.TargetPlayerName = s.TokenText()
+		return s.Scan(), command, nil
+
+	case "table_info":
+		command.Kind = CmdTableInfo
 		return s.Scan(), command, nil
 
 	default:
