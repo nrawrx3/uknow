@@ -52,6 +52,8 @@ type Console struct {
 	commandHistory          []string
 	commandHistoryIndex     int
 
+	stopEventPollChan chan struct{}
+
 	// Used to protect the non-gui state
 	stateMutex sync.Mutex
 
@@ -66,6 +68,16 @@ type Console struct {
 	liveConnsWaitGroup sync.WaitGroup
 
 	lastCommandFinished chan struct{}
+}
+
+func (c *Console) shutdown() {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	c.uiActionCond.L.Lock()
+	c.uiAction = uiStop
+	c.uiActionCond.Signal()
+	c.uiActionCond.L.Unlock()
 }
 
 func (c *Console) notifyRedrawUI(uiAction uiAction, exec func()) {
@@ -105,7 +117,7 @@ func (c *Console) startServer() {
 				uknow.LogInfo("Accept error: %s", err)
 			}
 
-			uknow.LogInfo("Received new connection: %s", conn.RemoteAddr())
+			uknow.Logger.Printf("%s server received new conn: %s", c.table.LocalPlayerName, conn.RemoteAddr())
 
 			c.liveConnsWaitGroup.Add(1)
 			go func() {
@@ -117,9 +129,6 @@ func (c *Console) startServer() {
 }
 
 func (c *Console) executeCommandCell() {
-	c.stateMutex.Lock()
-	defer c.stateMutex.Unlock()
-
 	c.commandPromptMutex.Lock()
 	defer c.commandPromptMutex.Unlock()
 	command, err := uknow.ParseCommandFromInput(c.commandStringBeingTyped)
@@ -133,6 +142,9 @@ func (c *Console) executeCommandCell() {
 }
 
 func (c *Console) executeCommand(command uknow.InputCommand) error {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
 	switch command.Kind {
 	case uknow.CmdConnect:
 		if c.table.State != uknow.StateBeforeReady {
@@ -168,7 +180,7 @@ func (c *Console) executeCommand(command uknow.InputCommand) error {
 func (c *Console) appendEventLog(line string) {
 	c.notifyRedrawUI(uiRedraw, func() {
 		c.eventLogCell.Text = fmt.Sprintf("%s\n%s", c.eventLogCell.Text, line)
-		uknow.Logger.Println(line)
+		// uknow.Logger.Println(line)
 	})
 }
 
@@ -275,17 +287,17 @@ func (c *Console) AddPlayer(args AddPlayerArgs, reply *AddPlayerReply) error {
 	// Avoid connecting to self
 	if args.CallerPlayerName == c.table.LocalPlayerName {
 		c.appendEventLog("Cannot connect to self.")
-		return fmt.Errorf("Player %s cannot connect to self", args.CallerPlayerName)
+		return fmt.Errorf("%s cannot connect to self", args.CallerPlayerName)
 	}
 
 	c.stateMutex.Lock()
 	defer c.stateMutex.Unlock()
 
-	uknow.Logger.Printf("AddPlayer running")
+	uknow.Logger.Printf("%s AddPlayer called by %s", c.table.LocalPlayerName, args.CallerPlayerName)
 
-	c.appendEventLog(fmt.Sprintf("Received AddPlayer call from %+v", args.CallerPlayerName))
+	c.appendEventLog(fmt.Sprintf("%s Received AddPlayer call from %+v", c.table.LocalPlayerName, args.CallerPlayerName))
 
-	_, exists := c.table.IndexOfPlayer[args.CallerPlayerName]
+	_, exists := c.remoteAddrOfPlayer[args.CallerPlayerName]
 	if exists {
 		return fmt.Errorf("Player with name '%s' already added", args.CallerPlayerName)
 	}
@@ -305,25 +317,56 @@ func (c *Console) AddPlayer(args AddPlayerArgs, reply *AddPlayerReply) error {
 	reply.CallerRemoteAddr = c.listener.Addr().String()
 	reply.RemoteAddrOfPlayer = c.remoteAddrOfPlayer
 
+	// Connect to players that we (the callee) are not connected to but the caller is.
+	go func() {
+		c.stateMutex.Lock()
+		defer c.stateMutex.Unlock()
+		uknow.Logger.Printf("%s acquired lock - will set up transitive connections", c.table.LocalPlayerName)
+		err := c.connectToKnownPlayers(args.RemoteAddrOfPlayer, fmt.Sprintf("AddPlayer invoked by %s", args.CallerPlayerName))
+		if err != nil {
+			uknow.Logger.Printf("%s - %s", c.table.LocalPlayerName, err)
+		}
+		uknow.Logger.Printf("%s done setting up transitive connections", c.table.LocalPlayerName)
+	}()
+
 	return nil
 }
 
 // connectToKnownPlayers is establishes rpc connections with peers that are connected to at least one of the
 // servers that the local server asked to be added to
-func (c *Console) connectToKnownPlayers(remoteAddrOfPlayer map[string]string) error {
+func (c *Console) connectToKnownPlayers(remoteAddrOfPlayer map[string]string, addPlayerMessage string) error {
+	newPlayersConnected := make([]string, 0)
 	for playerName, remoteAddr := range remoteAddrOfPlayer {
 		if _, exists := c.table.IndexOfPlayer[playerName]; exists {
 			continue
 		}
+
+		uknow.Logger.Printf("%s - transitively connecting to %s due to %s", c.table.LocalPlayerName, playerName, addPlayerMessage)
 		rpcClient, err := rpc.Dial("tcp", remoteAddr)
 		if err != nil {
 			err = fmt.Errorf("Failed to connect to caller player in response: %s", err)
 			return err
 		}
+
 		c.rpcClientOfPlayer[playerName] = rpcClient
 		c.remoteAddrOfPlayer[playerName] = remoteAddr
 		c.table.AddPlayer(playerName)
+
+		args := AddPlayerArgs{
+			RPCBaseArgs:        c.getRPCBaseArgs(),
+			RemoteAddrOfPlayer: c.remoteAddrOfPlayer,
+		}
+
+		var reply AddPlayerReply
+
+		if err := rpcClient.Call("Console.AddPlayer", args, &reply); err != nil {
+			uknow.Logger.Printf("%s: %s", c.table.LocalPlayerName, err)
+			continue
+		}
+		newPlayersConnected = append(newPlayersConnected, playerName)
 	}
+
+	uknow.Logger.Printf("%s connected transitively to new players: %v", c.table.LocalPlayerName, newPlayersConnected)
 	return nil
 }
 
@@ -360,9 +403,10 @@ func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
 	c.remoteAddrOfPlayer[reply.CallerPlayerName] = addr
 	c.rpcClientOfPlayer[reply.CallerPlayerName] = rpcClient
 
-	uknow.Logger.Printf("rpcClientOfPlayer[%s]= %v", reply.CallerPlayerName, c.rpcClientOfPlayer[reply.CallerPlayerName])
+	uknow.Logger.Printf("%s connecting transitively on AddPlayer response", c.table.LocalPlayerName)
 
-	c.connectToKnownPlayers(reply.RemoteAddrOfPlayer)
+	c.connectToKnownPlayers(reply.RemoteAddrOfPlayer, fmt.Sprintf("Response of AddPlayer call on %s", reply.CallerPlayerName))
+	uknow.Logger.Printf("%s done setting up transitive connections", c.table.LocalPlayerName)
 	return rpcClient, nil
 }
 
@@ -440,16 +484,10 @@ func init() {
 	flag.StringVar(&localPlayerName, "name", "", "Your name")
 }
 
-func (c *Console) initWidgets() {
-	if err := ui.Init(); err != nil {
-		log.Fatalf("Failed to initialized termui: %v", err)
-	}
-
-	c.uiActionCond = sync.NewCond(&c.uiActionMutex)
-	c.uiAction = uiRedraw
-
-	c.table = uknow.NewTable(localPlayerName)
-
+// Creates and initializes the widget structs. All updates to the UI happens via modifying data in these
+// structs. So even if we don't have a ui goro running, these structs can be modified anyway - no need to
+// check first if ui is disabled or not
+func (c *Console) initWidgetObjects() {
 	c.tableCell = widgets.NewParagraph()
 	c.tableCell.Title = "Table"
 
@@ -472,6 +510,17 @@ func (c *Console) initWidgets() {
 
 	c.commandHistoryIndex = -1
 	c.commandHistory = make([]string, 0, 64)
+}
+
+func (c *Console) initWidgets() {
+	if err := ui.Init(); err != nil {
+		log.Fatalf("Failed to initialized termui: %v", err)
+	}
+
+	c.uiActionCond = sync.NewCond(&c.uiActionMutex)
+	c.uiAction = uiRedraw
+
+	c.initWidgetObjects()
 
 	c.grid = ui.NewGrid()
 	termWidth, termHeight := ui.TerminalDimensions()
@@ -488,25 +537,29 @@ func (c *Console) initWidgets() {
 	)
 }
 
+func (c *Console) createTableAndStartServer(playerName string) {
+	c.table = uknow.NewTable(playerName)
+	c.stopEventPollChan = make(chan struct{}, 2) // In unit tests there is no event polling goro so we don't want to block when signalling it to stop
+	c.startServer()
+}
+
 func main() {
 	flag.Parse()
-
-	c.initWidgets()
-	defer ui.Close()
-
 	if localPlayerName == "" {
 		log.Fatalf("Need -name=<your_name> flag")
 	}
-
 	if !playerNameRegex.MatchString(localPlayerName) {
 		log.Fatalf("Only names with alpha-numeric and underscore characters allowed")
 	}
 
+	c.initWidgets()
+	defer ui.Close()
+
 	uknow.Logger = createFileLogger(true)
 
-	// uknow.Logger = log.New(&ConsoleLogger{c: &c}, localPlayerName, log.Lshortfile|log.Ltime)
+	c.createTableAndStartServer(localPlayerName)
 
-	c.startServer()
+	// uknow.Logger = log.New(&ConsoleLogger{c: &c}, localPlayerName, log.Lshortfile|log.Ltime)
 
 	go func() {
 		defer func() {
@@ -572,7 +625,10 @@ func main() {
 				// 	c.uiActionCond.L.Unlock()
 				// 	c.uiActionCond.Signal()
 				// 	tickerCount++
-
+				//
+				//
+			case <-c.stopEventPollChan:
+				return
 			}
 		}
 	}()

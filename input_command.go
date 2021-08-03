@@ -20,6 +20,8 @@ const (
 	CmdChallenge
 	CmdConnect
 	CmdTableInfo
+	CmdArrangePlayersAndShuffle
+	CmdDeclareReady
 )
 
 type InputCommand struct {
@@ -82,6 +84,14 @@ func parseCommand(s *scanner.Scanner, tok rune) (rune, InputCommand, error) {
 	}
 
 	switch strings.ToLower(s.TokenText()) {
+	case "ready":
+		command.Kind = CmdDeclareReady
+		return s.Scan(), command, nil
+
+	case "arrange_and_shuffle":
+		command.Kind = CmdArrangePlayersAndShuffle
+		return s.Scan(), command, nil
+
 	case "draw":
 		command.Kind = CmdDrawCard
 		command.Count = 1

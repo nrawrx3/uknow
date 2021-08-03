@@ -170,8 +170,9 @@ func (d Deck) RemoveCard(index int) Deck {
 
 type State int
 
+//go:generate stringer -type=State
 const (
-	StateBeforeConnect State = iota
+	StateBeforeReady State = iota
 	StateBeforeShuffle
 	StateWaitForDraw
 )
@@ -193,7 +194,7 @@ func NewTable(localPlayerName string) *Table {
 	table := &Table{
 		DrawDeck: NewFullDeck(),
 		Pile:     NewEmptyDeck(),
-		State:    StateBeforeConnect,
+		State:    StateBeforeReady,
 	}
 
 	table.HandOfPlayer = make(map[string]Deck)
@@ -241,16 +242,23 @@ func (t *Table) PlayerIndexFromName(playerName string) int {
 	panic(fmt.Errorf("Non-existent player name: '%s'", playerName))
 }
 
-func (t *Table) SitDownPlayers() []int {
-	shuffledIndices := ShuffleIntRange(0, t.PlayerCount())
-	t.ShufflePlayersByIndices(shuffledIndices)
-	return shuffledIndices
+func (t *Table) SetIndexOfPlayer(indexOfPlayer map[string]int) error {
+	for playerName, index := range indexOfPlayer {
+		_, exists := t.IndexOfPlayer[playerName]
+		if !exists {
+			return fmt.Errorf("Player %s does not exist in table", playerName)
+		}
+		t.IndexOfPlayer[playerName] = index
+		t.PlayerNames[index] = playerName
+	}
+
+	return nil
 }
 
-func (t *Table) ShufflePlayersByIndices(shuffledIndices []int) {
+func (t *Table) RearrangePlayerIndices(indices []int) {
 	sort.Sort(t.PlayerNames)
 
-	for i, j := range shuffledIndices {
+	for i, j := range indices {
 		t.PlayerNames[i], t.PlayerNames[j] = t.PlayerNames[j], t.PlayerNames[i]
 		t.IndexOfPlayer[t.PlayerNames[i]] = i
 		t.IndexOfPlayer[t.PlayerNames[j]] = j
