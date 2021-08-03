@@ -135,8 +135,8 @@ func (c *Console) executeCommandCell() {
 func (c *Console) executeCommand(command uknow.InputCommand) error {
 	switch command.Kind {
 	case uknow.CmdConnect:
-		if c.table.State != uknow.StateBeforeConnect {
-			c.appendEventLog("Game already started, cannot connect anymore")
+		if c.table.State != uknow.StateBeforeReady {
+			c.appendEventLog(fmt.Sprintf("%s - expected game state: %s, havbe: %s", command.Kind, uknow.StateBeforeReady, c.table.State))
 			return nil
 		}
 		c.appendEventLog(fmt.Sprintf("Connecting to peer: %s", command.ConnectAddress))
@@ -145,6 +145,14 @@ func (c *Console) executeCommand(command uknow.InputCommand) error {
 			c.appendEventLog(fmt.Sprintf("%s", err))
 			return err
 		}
+
+	case uknow.CmdDeclareReady:
+		if c.table.State != uknow.StateBeforeReady {
+			c.appendEventLog(fmt.Sprintf("%s - expected game state: %s, havbe: %s", command.Kind, uknow.StateBeforeReady, c.table.State))
+			return nil
+		}
+
+		c.declareGameIsReady()
 
 	case uknow.CmdTableInfo:
 		c.printTableInfo()
@@ -177,7 +185,7 @@ func (c *Console) appendCommandPrompt(s string) {
 	c.commandPromptMutex.Lock()
 	defer c.commandPromptMutex.Unlock()
 	c.commandStringBeingTyped += s
-	uknow.Logger.Printf("c.commandStringBeintTyped = %s\n", c.commandStringBeingTyped)
+	// uknow.Logger.Printf("c.commandStringBeintTyped = %s\n", c.commandStringBeingTyped)
 	c.notifyRedrawUI(uiRedraw, func() {
 		c.commandPromptCell.Text = fmt.Sprintf(" %s_", c.commandStringBeingTyped)
 	})
@@ -217,10 +225,12 @@ func (c *Console) printTableInfo() {
 	}
 
 	msg := fmt.Sprintf(`
+State:		%s,
 Players:	%+v,
 Hand counts:	%+v,
 DrawDeck count: %+v,
 DiscardPile count: %+v`,
+		c.table.State,
 		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
 	c.appendEventLog(msg)
 	uknow.Logger.Printf(msg)
@@ -249,16 +259,12 @@ func (c *Console) getRPCBaseArgs() RPCBaseArgs {
 }
 
 type AddPlayerArgs struct {
-	// RPCBaseArgs
-	CallerPlayerName   string            // name of the caller/replier player
-	CallerRemoteAddr   string            // address at which the caller/replier player is serving RPC requests
+	RPCBaseArgs
 	RemoteAddrOfPlayer map[string]string // read by callee to connect to already existing players that it has not connected to
 }
 
 type AddPlayerReply struct {
-	// RPCBaseArgs
-	CallerPlayerName   string            // name of the caller/replier player
-	CallerRemoteAddr   string            // address at which the caller/replier player is serving RPC requests
+	RPCBaseArgs
 	RemoteAddrOfPlayer map[string]string // read by caller to connect to already existing players that it has not connected to
 }
 
@@ -341,8 +347,7 @@ func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
 
 	// Don't know the name of the peer yet. We will obtain it from the reply of the AddPlayer RPC.
 	args := AddPlayerArgs{
-		CallerPlayerName:   c.table.LocalPlayerName,
-		CallerRemoteAddr:   c.listener.Addr().String(),
+		RPCBaseArgs:        c.getRPCBaseArgs(),
 		RemoteAddrOfPlayer: c.remoteAddrOfPlayer,
 	}
 	var reply AddPlayerReply
@@ -352,32 +357,92 @@ func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
 	}
 
 	c.table.AddPlayer(reply.CallerPlayerName)
-
 	c.remoteAddrOfPlayer[reply.CallerPlayerName] = addr
 	c.rpcClientOfPlayer[reply.CallerPlayerName] = rpcClient
 
+	uknow.Logger.Printf("rpcClientOfPlayer[%s]= %v", reply.CallerPlayerName, c.rpcClientOfPlayer[reply.CallerPlayerName])
+
 	c.connectToKnownPlayers(reply.RemoteAddrOfPlayer)
 	return rpcClient, nil
+}
+
+type GameIsReadyArgs struct {
+	RPCBaseArgs
+	indexOfPlayerMap map[string]int // Client of the declaring player will randomly settle upon an orientation of the players in the table
+}
+
+type GameIsReadyReply struct {
+	RPCBaseArgs
+}
+
+func (c *Console) GameIsReady(args GameIsReadyArgs, reply *GameIsReadyReply) error {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	if c.table.State != uknow.StateBeforeReady {
+		return fmt.Errorf("Invalid state: %s", c.table.State)
+	}
+
+	c.table.SetIndexOfPlayer(args.indexOfPlayerMap)
+	c.table.State = uknow.StateBeforeShuffle
+	reply.RPCBaseArgs = c.getRPCBaseArgs()
+	return nil
+}
+
+func (c *Console) declareGameIsReady() error {
+	shuffledRange := uknow.ShuffleIntRange(0, len(c.table.PlayerNames))
+	c.table.RearrangePlayerIndices(shuffledRange)
+
+	args := GameIsReadyArgs{
+		RPCBaseArgs:      c.getRPCBaseArgs(),
+		indexOfPlayerMap: c.table.IndexOfPlayer,
+	}
+
+	var wg sync.WaitGroup
+
+	replies := make([]GameIsReadyReply, c.table.PlayerCount())
+	errors := make([]error, c.table.PlayerCount())
+
+	for playerName, playerIndex := range c.table.IndexOfPlayer {
+		if playerName == c.table.LocalPlayerName {
+			continue
+		}
+
+		rpcClient, exists := c.rpcClientOfPlayer[playerName]
+
+		if !exists {
+			panic(fmt.Errorf("No rpcClient for player %s", playerName))
+		}
+
+		wg.Add(1)
+		go func(playerIndex int) {
+			err := rpcClient.Call("Console.GameIsReady", args, &replies[playerIndex])
+			if err != nil {
+				uknow.Logger.Printf("Console.GameIsReady failed for playerName: %s", err)
+				errors[playerIndex] = err
+			}
+			wg.Done()
+		}(playerIndex)
+	}
+	wg.Wait()
+
+	for _, err := range errors {
+		if err != nil {
+			return err
+		}
+	}
+
+	c.table.State = uknow.StateBeforeShuffle
+	return nil
 }
 
 func init() {
 	flag.StringVar(&localPlayerName, "name", "", "Your name")
 }
 
-func main() {
-	flag.Parse()
+func (c *Console) initWidgets() {
 	if err := ui.Init(); err != nil {
 		log.Fatalf("Failed to initialized termui: %v", err)
-	}
-
-	defer ui.Close()
-
-	if localPlayerName == "" {
-		log.Fatalf("Need -name=<your_name> flag")
-	}
-
-	if !playerNameRegex.MatchString(localPlayerName) {
-		log.Fatalf("Only names with alpha-numeric and underscore characters allowed")
 	}
 
 	c.uiActionCond = sync.NewCond(&c.uiActionMutex)
@@ -421,6 +486,21 @@ func main() {
 		ui.NewRow(0.1,
 			ui.NewCol(1.0, c.commandPromptCell)),
 	)
+}
+
+func main() {
+	flag.Parse()
+
+	c.initWidgets()
+	defer ui.Close()
+
+	if localPlayerName == "" {
+		log.Fatalf("Need -name=<your_name> flag")
+	}
+
+	if !playerNameRegex.MatchString(localPlayerName) {
+		log.Fatalf("Only names with alpha-numeric and underscore characters allowed")
+	}
 
 	uknow.Logger = createFileLogger(true)
 
@@ -481,7 +561,7 @@ func main() {
 					}
 					c.commandPromptMutex.Unlock()
 				default:
-					uknow.Logger.Printf("Event: %v\n", e)
+					// uknow.Logger.Printf("Event: %v\n", e)
 					c.appendCommandPrompt(e.ID)
 				}
 
