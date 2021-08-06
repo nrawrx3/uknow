@@ -61,7 +61,7 @@ of every other peer in the cluster.
 From that perspective, we are joining clusters whenever a peer is asked by user to connect to some addr it is
 not currently connected to. We need this process to be extremely synchronous, for lack of a better phrase.
 
-Let's say you have 2 clusters C_1 and C_2. The player Alice is in C1 and Bob is in C2.
+Let's say you have 2 clusters `C_1` and `C_2`. The player Alice is in C1 and Bob is in C2.
 
 - The player Alice initiates a `connect <addr of Bob>` command.
 - Alice will invoke the MeetNewCluster RPC on Bob
@@ -89,7 +89,7 @@ Let's say you have 2 clusters C_1 and C_2. The player Alice is in C1 and Bob is 
 		// Note that Alice will not send her cluster map here
 	}
 
-- The reply of MeetPlayer is just an empty struct - we can add the callerPlayer*** fields also, but unneeded.
+- The reply of MeetPlayer is just an empty struct - we can add the `callerPlayer***` fields also, but unneeded.
 
 - Alice will then *tell* each of her peers (except Bob) to invoke MeetPlayer RPC on each player of
   RemoteAddrOfPlayer. Alice does this *telling* by invoking MeetPlayerAndInformMe RPC.
@@ -117,3 +117,4 @@ Let's say you have 2 clusters C_1 and C_2. The player Alice is in C1 and Bob is 
 - If we focus on the app at hand now - we can see that there will only be a couple of players. But this
   protocol will work for any N player and the async approach above can help cutting time. Although each of
   alice's neighbor should invoke the MeetPlayer RPC on the other cluster's peers in a random order/
+

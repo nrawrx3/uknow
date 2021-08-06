@@ -34,6 +34,29 @@ const (
 	uiStop
 )
 
+type ClusterMap map[string]string // Map of player name to their public address
+
+func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
+	if excludePlayers == nil {
+		excludePlayers = []string{}
+	}
+
+	cloned := make(ClusterMap)
+	for k, v := range c {
+		exclude := false
+		for _, e := range excludePlayers {
+			if e == k {
+				exclude = true
+				break
+			}
+		}
+		if !exclude {
+			cloned[k] = v
+		}
+	}
+	return cloned
+}
+
 // Signalling the UI goro that we have updated UI data is done by the uiActionCond and concurrenct rw is
 // protected by the uiActionMutex
 type Console struct {
@@ -62,7 +85,7 @@ type Console struct {
 	rpcClientOfPlayer  map[string]*rpc.Client
 	rpcServer          *rpc.Server
 	listener           net.Listener
-	remoteAddrOfPlayer map[string]string
+	neighborListenAddr ClusterMap
 
 	// Live connections will keep this wait group alive until all are closed
 	liveConnsWaitGroup sync.WaitGroup
@@ -93,7 +116,7 @@ var c Console
 
 func (c *Console) startServer() {
 	c.rpcClientOfPlayer = make(map[string]*rpc.Client)
-	c.remoteAddrOfPlayer = make(map[string]string)
+	c.neighborListenAddr = make(map[string]string)
 
 	c.rpcServer = rpc.NewServer()
 	if err := c.rpcServer.RegisterName("Console", c); err != nil {
@@ -148,11 +171,11 @@ func (c *Console) executeCommand(command uknow.InputCommand) error {
 	switch command.Kind {
 	case uknow.CmdConnect:
 		if c.table.State != uknow.StateBeforeReady {
-			c.appendEventLog(fmt.Sprintf("%s - expected game state: %s, havbe: %s", command.Kind, uknow.StateBeforeReady, c.table.State))
+			c.appendEventLog(fmt.Sprintf("%s - expected game state: %s, have: %s", command.Kind, uknow.StateBeforeReady, c.table.State))
 			return nil
 		}
 		c.appendEventLog(fmt.Sprintf("Connecting to peer: %s", command.ConnectAddress))
-		if _, err := c.connectToPeer(command.ConnectAddress); err != nil {
+		if err := c.connectToPeer(command.ConnectAddress); err != nil {
 			uknow.LogInfo("%s", err)
 			c.appendEventLog(fmt.Sprintf("%s", err))
 			return err
@@ -258,156 +281,185 @@ func (c *Console) refillHandcountChart() {
 	})
 }
 
+func (c *Console) addNewPlayer(playerName, peerlistenAddr string, rpcClient *rpc.Client) {
+	c.neighborListenAddr[playerName] = peerlistenAddr
+	c.rpcClientOfPlayer[playerName] = rpcClient
+	c.table.AddPlayer(playerName)
+}
+
 type RPCBaseArgs struct {
 	CallerPlayerName string // name of the caller/replier player
-	CallerRemoteAddr string // address at which the caller/replier player is serving RPC requests
+	CallerListenAddr string // address at which the caller/replier player is serving RPC requests
 }
 
 func (c *Console) getRPCBaseArgs() RPCBaseArgs {
 	return RPCBaseArgs{
 		CallerPlayerName: c.table.LocalPlayerName,
-		CallerRemoteAddr: c.listener.Addr().String(),
+		CallerListenAddr: c.listener.Addr().String(),
 	}
 }
 
-type AddPlayerArgs struct {
+type MeetNewClusterArgs struct {
 	RPCBaseArgs
-	RemoteAddrOfPlayer map[string]string // read by callee to connect to already existing players that it has not connected to
 }
 
-type AddPlayerReply struct {
+type MeetNewClusterReply struct {
 	RPCBaseArgs
-	RemoteAddrOfPlayer map[string]string // read by caller to connect to already existing players that it has not connected to
+	neighborAddresses ClusterMap
 }
 
-// AddPlayer adds the caller player to the game. The callee adds the caller player to its state and replies
-// with the currently available players in the cluster so that the caller can call AddPlayer on each of these
-// also.
-func (c *Console) AddPlayer(args AddPlayerArgs, reply *AddPlayerReply) error {
-	// Avoid connecting to self
-	if args.CallerPlayerName == c.table.LocalPlayerName {
-		c.appendEventLog("Cannot connect to self.")
-		return fmt.Errorf("%s cannot connect to self", args.CallerPlayerName)
-	}
-
+func (c *Console) MeetNewCluster(args MeetNewClusterArgs, reply *MeetNewClusterReply) error {
 	c.stateMutex.Lock()
 	defer c.stateMutex.Unlock()
 
-	uknow.Logger.Printf("%s AddPlayer called by %s", c.table.LocalPlayerName, args.CallerPlayerName)
-
-	c.appendEventLog(fmt.Sprintf("%s Received AddPlayer call from %+v", c.table.LocalPlayerName, args.CallerPlayerName))
-
-	_, exists := c.remoteAddrOfPlayer[args.CallerPlayerName]
-	if exists {
-		return fmt.Errorf("Player with name '%s' already added", args.CallerPlayerName)
+	if _, alreadyConnected := c.neighborListenAddr[args.CallerPlayerName]; alreadyConnected {
+		return fmt.Errorf("already_connected")
 	}
 
-	client, err := rpc.Dial("tcp", args.CallerRemoteAddr)
-	if err != nil {
-		err = fmt.Errorf("Failed to connect to caller player in response: %s", err)
-		uknow.LogInfo("%s", err)
-		return err
-	}
+	reply.RPCBaseArgs = c.getRPCBaseArgs()
+	reply.neighborAddresses = c.neighborListenAddr.Clone(nil)
 
-	c.rpcClientOfPlayer[args.CallerPlayerName] = client
-	c.remoteAddrOfPlayer[args.CallerPlayerName] = args.CallerRemoteAddr
-	c.table.AddPlayer(args.CallerPlayerName)
-
-	reply.CallerPlayerName = c.table.LocalPlayerName
-	reply.CallerRemoteAddr = c.listener.Addr().String()
-	reply.RemoteAddrOfPlayer = c.remoteAddrOfPlayer
-
-	// Connect to players that we (the callee) are not connected to but the caller is.
+	// Set up the rpcClient.
 	go func() {
+		rpcClient, err := rpc.Dial("tcp", args.CallerListenAddr)
+		if err != nil {
+			uknow.Logger.Printf("Failed to dial %s at address %s", args.CallerPlayerName, args.CallerListenAddr)
+			return
+		}
 		c.stateMutex.Lock()
 		defer c.stateMutex.Unlock()
-		uknow.Logger.Printf("%s acquired lock - will set up transitive connections", c.table.LocalPlayerName)
-		err := c.connectToKnownPlayers(args.RemoteAddrOfPlayer, fmt.Sprintf("AddPlayer invoked by %s", args.CallerPlayerName))
-		if err != nil {
-			uknow.Logger.Printf("%s - %s", c.table.LocalPlayerName, err)
-		}
-		uknow.Logger.Printf("%s done setting up transitive connections", c.table.LocalPlayerName)
+		c.addNewPlayer(args.CallerPlayerName, args.CallerListenAddr, rpcClient)
 	}()
 
 	return nil
 }
 
-// connectToKnownPlayers is establishes rpc connections with peers that are connected to at least one of the
-// servers that the local server asked to be added to
-func (c *Console) connectToKnownPlayers(remoteAddrOfPlayer map[string]string, addPlayerMessage string) error {
-	newPlayersConnected := make([]string, 0)
-	for playerName, remoteAddr := range remoteAddrOfPlayer {
-		if _, exists := c.table.IndexOfPlayer[playerName]; exists {
-			continue
-		}
+type MeetMeArgs struct {
+	RPCBaseArgs
+}
 
-		uknow.Logger.Printf("%s - transitively connecting to %s due to %s", c.table.LocalPlayerName, playerName, addPlayerMessage)
-		rpcClient, err := rpc.Dial("tcp", remoteAddr)
-		if err != nil {
-			err = fmt.Errorf("Failed to connect to caller player in response: %s", err)
-			return err
-		}
+type MeetMeReply struct {
+	RPCBaseArgs
+}
 
-		c.rpcClientOfPlayer[playerName] = rpcClient
-		c.remoteAddrOfPlayer[playerName] = remoteAddr
-		c.table.AddPlayer(playerName)
-
-		args := AddPlayerArgs{
-			RPCBaseArgs:        c.getRPCBaseArgs(),
-			RemoteAddrOfPlayer: c.remoteAddrOfPlayer,
-		}
-
-		var reply AddPlayerReply
-
-		if err := rpcClient.Call("Console.AddPlayer", args, &reply); err != nil {
-			uknow.Logger.Printf("%s: %s", c.table.LocalPlayerName, err)
-			continue
-		}
-		newPlayersConnected = append(newPlayersConnected, playerName)
+func (c *Console) MeetMe(args MeetMeArgs, reply *MeetMeReply) error {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+	if _, exists := c.neighborListenAddr[args.CallerPlayerName]; exists {
+		uknow.Logger.Printf("%s: already met player %s", c.table.LocalPlayerName, args.CallerPlayerName)
 	}
 
-	uknow.Logger.Printf("%s connected transitively to new players: %v", c.table.LocalPlayerName, newPlayersConnected)
+	go func() {
+		rpcClient, err := rpc.Dial("tcp", args.CallerListenAddr)
+		if err != nil {
+			uknow.Logger.Printf("%s: %s", c.table.LocalPlayerName, err)
+		}
+
+		c.stateMutex.Lock()
+		defer c.stateMutex.Unlock()
+		c.rpcClientOfPlayer[args.CallerPlayerName] = rpcClient
+		c.neighborListenAddr[args.CallerPlayerName] = args.CallerListenAddr
+		c.table.AddPlayer(args.CallerPlayerName)
+	}()
+
 	return nil
 }
 
-func (c *Console) connectToPeer(addr string) (*rpc.Client, error) {
-	uknow.Logger.Printf("connectToPeer %s...", addr)
+type MeetEachPlayerOfClusterArgs struct {
+	RPCBaseArgs
+	ClusterMap ClusterMap
+}
 
-	// Check if we already have a connection open to this peer. This shouldn't happen.
-	for _, remoteAddr := range c.remoteAddrOfPlayer {
-		if remoteAddr == addr {
-			err := fmt.Errorf("Already connected to remote address %s", remoteAddr)
-			uknow.LogInfo("%s", err)
-			return nil, err
+type MeetEachPlayerOfClusterReply struct {
+	RPCBaseArgs
+}
+
+// OPTY: rpcClient.Dial calls can be made to timeout using a channel. connectToPeer also blocks the console
+// from serving any other meaningful request.
+func (c *Console) connectToPeer(peerListenAddr string) error {
+	// First check if already connected.
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	for _, addr := range c.neighborListenAddr {
+		if addr == peerListenAddr {
+			return fmt.Errorf("Already connected to a player at addr %s", addr)
 		}
 	}
 
-	rpcClient, err := rpc.Dial("tcp", addr)
+	rpcClient, err := rpc.Dial("tcp", peerListenAddr)
 	if err != nil {
-		uknow.Logger.Printf("Failed to connect to remote player at address: %s\n", addr)
-		return nil, err
+		return fmt.Errorf("Could not connect to player at addr %s", peerListenAddr)
 	}
 
-	// Don't know the name of the peer yet. We will obtain it from the reply of the AddPlayer RPC.
-	args := AddPlayerArgs{
-		RPCBaseArgs:        c.getRPCBaseArgs(),
-		RemoteAddrOfPlayer: c.remoteAddrOfPlayer,
-	}
-	var reply AddPlayerReply
-	if err := rpcClient.Call("Console.AddPlayer", args, &reply); err != nil {
-		uknow.LogInfo("Failed to invoke AddPlayer RPC on peer: %s", err)
-		return rpcClient, err
+	args := MeetNewClusterArgs{c.getRPCBaseArgs()}
+	var reply MeetNewClusterReply
+	if err := rpcClient.Call("Console.MeetNewCluster", args, &reply); err != nil {
+		return err
 	}
 
-	c.table.AddPlayer(reply.CallerPlayerName)
-	c.remoteAddrOfPlayer[reply.CallerPlayerName] = addr
-	c.rpcClientOfPlayer[reply.CallerPlayerName] = rpcClient
+	playersInInitialCluster := c.neighborListenAddr.Clone(nil)
+	c.addNewPlayer(reply.CallerPlayerName, reply.CallerListenAddr, rpcClient)
 
-	uknow.Logger.Printf("%s connecting transitively on AddPlayer response", c.table.LocalPlayerName)
+	go func() {
+		var wg sync.WaitGroup
 
-	c.connectToKnownPlayers(reply.RemoteAddrOfPlayer, fmt.Sprintf("Response of AddPlayer call on %s", reply.CallerPlayerName))
-	uknow.Logger.Printf("%s done setting up transitive connections", c.table.LocalPlayerName)
-	return rpcClient, nil
+		// Meet each player in the other cluster
+		for playerName, peerListenAddr := range reply.neighborAddresses {
+			if playerName == c.table.LocalPlayerName || playerName == reply.CallerPlayerName {
+				continue
+			}
+
+			wg.Add(1)
+			go func(playerName, peerListenAddr string) {
+				defer wg.Done()
+				rpcClient, err := rpc.Dial("tcp", peerListenAddr)
+				if err != nil {
+					uknow.Logger.Printf("Failed to dial to player %s addr %s", playerName, peerListenAddr)
+					return
+				}
+
+				meetMeArgs := MeetMeArgs{c.getRPCBaseArgs()}
+				var meetMeReply MeetMeReply
+				err = rpcClient.Call("Console.MeetMe", meetMeArgs, &meetMeReply)
+				if err != nil {
+					uknow.Logger.Printf("Console.MeetMe failed: %s", err)
+					return
+				}
+
+				c.addNewPlayer(playerName, peerListenAddr, rpcClient)
+			}(playerName, peerListenAddr)
+		}
+		wg.Wait()
+
+		// .. Inform self's neigbors (the ones that it was already connected to before the previous set of
+		// RPCs) to connect to the new neighbors
+
+		neighborAddresses := reply.neighborAddresses.Clone(nil)
+		neighborAddresses[reply.CallerPlayerName] = reply.CallerListenAddr
+
+		c.stateMutex.Lock()
+		for neighborName, rpcClient := range c.rpcClientOfPlayer {
+			_, inInitialCluster := playersInInitialCluster[neighborName]
+			if inInitialCluster {
+				wg.Add(1)
+				go func(neighborClient string, rpcClient *rpc.Client) {
+					defer wg.Done()
+					args := MeetEachPlayerOfClusterArgs{
+						RPCBaseArgs: c.getRPCBaseArgs(),
+						ClusterMap:  neighborAddresses,
+					}
+					var reply MeetEachPlayerOfClusterReply
+
+					rpcClient.Call("Console.MeetEachPlayerOfCluster", args, &reply)
+				}(neighborName, rpcClient)
+			}
+		}
+		c.stateMutex.Unlock()
+		wg.Wait()
+	}()
+
+	return nil
 }
 
 type GameIsReadyArgs struct {

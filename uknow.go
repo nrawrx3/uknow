@@ -132,7 +132,7 @@ func NewFullDeck() Deck {
 	}
 
 	// 4 CardWild and 4 CardWildDrawFour
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 4; i++ 
 		cards = append(cards, Card{Number: CardWildDrawFour, Color: 0})
 		cards = append(cards, Card{Number: CardWild, Color: 0})
 	}
