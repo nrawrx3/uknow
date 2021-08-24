@@ -132,7 +132,7 @@ func NewFullDeck() Deck {
 	}
 
 	// 4 CardWild and 4 CardWildDrawFour
-	for i := 0; i < 4; i++ 
+	for i := 0; i < 4; i++ {
 		cards = append(cards, Card{Number: CardWildDrawFour, Color: 0})
 		cards = append(cards, Card{Number: CardWild, Color: 0})
 	}
@@ -191,20 +191,29 @@ type Table struct {
 }
 
 func NewTable(localPlayerName string) *Table {
-	table := &Table{
-		DrawDeck: NewFullDeck(),
-		Pile:     NewEmptyDeck(),
-		State:    StateBeforeReady,
-	}
-
-	table.HandOfPlayer = make(map[string]Deck)
-	table.IndexOfPlayer = make(map[string]int)
-	table.PlayerNames = make([]string, 0, 16)
-
+	table := createNewTable()
 	table.LocalPlayerName = localPlayerName
 	table.AddPlayer(localPlayerName)
-
 	return table
+}
+
+func NewServerTable() *Table {
+	return createNewTable()
+}
+
+func createNewTable() *Table {
+	return &Table{
+		DrawDeck:      NewFullDeck(),
+		Pile:          NewEmptyDeck(),
+		State:         StateBeforeReady,
+		HandOfPlayer:  make(map[string]Deck),
+		IndexOfPlayer: make(map[string]int),
+		PlayerNames:   make([]string, 0, 16),
+	}
+}
+
+func (t *Table) IsServerTable() bool {
+	return t.LocalPlayerName == ""
 }
 
 func (t *Table) AddPlayer(playerName string) error {

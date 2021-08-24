@@ -118,3 +118,16 @@ Let's say you have 2 clusters `C_1` and `C_2`. The player Alice is in C1 and Bob
   protocol will work for any N player and the async approach above can help cutting time. Although each of
   alice's neighbor should invoke the MeetPlayer RPC on the other cluster's peers in a random order/
 
+------------------ FUCK ALL THIS ------------------------
+
+
+
+
+
+
+
+
+Have a server idiot. Replicate THAT. Not the fucking clients. Idiot.
+
+
+
