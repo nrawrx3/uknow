@@ -173,7 +173,7 @@ type State int
 //go:generate stringer -type=State
 const (
 	StateBeforeReady State = iota
-	StateBeforeShuffle
+	StateWaitForCommand
 	StateWaitForDraw
 )
 
@@ -197,7 +197,7 @@ func NewTable(localPlayerName string) *Table {
 	return table
 }
 
-func NewServerTable() *Table {
+func NewAdminTable() *Table {
 	return createNewTable()
 }
 
@@ -215,6 +215,8 @@ func createNewTable() *Table {
 func (t *Table) IsServerTable() bool {
 	return t.LocalPlayerName == ""
 }
+
+var PlayerAlreadyExists error = errors.New("Player already exists")
 
 func (t *Table) AddPlayer(playerName string) error {
 	for _, existingName := range t.PlayerNames {

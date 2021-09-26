@@ -13,29 +13,73 @@ import (
 type CommandKind int
 
 const (
-	CmdDropCard CommandKind = 1 + iota
-	CmdDrawCard
-	CmdDrawCardFromPile
-	CmdQuit
-	CmdChallenge
-	CmdConnect
-	CmdTableInfo
-	CmdArrangePlayersAndShuffle
-	CmdDeclareReady
+	ReservedNameDeck          = "<deck>"
+	ReservedNamePile          = "<pile>"
+	ReservedNameAdmin         = "<admin>"
+	ReservedNameClient        = "<player_client>"
+	ReservedNameCommandPrompt = "<command_prompt>"
 )
 
-type InputCommand struct {
-	Cards            []Card // TODO: we don't need multiple cards in a single input command ever iiuc
-	Kind             CommandKind
-	Count            int
-	TargetPlayerName string
-	ConnectAddress   string
+const (
+	CmdNone          CommandKind = iota
+	CmdAskUserToPlay             // Called by server to tell a user it's their turn
+	CmdDeclareReady              // A single user calls this on the server to signal the clients that all players have joined, the server then calls this on each client
+
+	// User decision commands. User decision commands are not sent from client to admin or vice versa.
+	// They are translated to state modifier commands.
+	CmdDropCard
+	CmdDrawCard
+	CmdDrawCardFromPile
+	CmdChallenge
+
+	// User non-game commands
+	CmdQuit
+	CmdConnect
+	CmdTableInfo
+
+	// State modifier commands. These are sent from client to admin and vice versa over the wire.
+	CmdAddCards
+	CmdMoveCards
+	CmdSetHand
+	CmdApprove // Only sent by admin to client
+
+	// Add player - admin asks players to add these to their local table
+	CmdAddPlayer
+)
+
+func (k CommandKind) IsUserDecisionCommand() bool {
+	return CmdDropCard <= k && k < CmdQuit
 }
 
-func NewInputCommand() InputCommand {
-	return InputCommand{
+// Represents a single command. Not all fields are used for all commands. TODO: _maybe_ use a sum type instead
+// of clubbing all possible payload in a single struct?
+type Command struct {
+	Cards            []Card      `json:"cards"`
+	Kind             CommandKind `json:"kind"`
+	Count            int         `json:"count"`
+	TargetPlayerName string      `json:"target_player_name"`
+	ExtraData        interface{} `json:"extra_data"`
+}
+
+func NewCommand(kind CommandKind) Command {
+	return Command{
+		Kind:  kind,
 		Cards: make([]Card, 0, 1),
 	}
+}
+
+func MakeCmdApprove(cmdKindToApprove CommandKind) Command {
+	cmd := NewCommand(CmdApprove)
+	cmd.ExtraData = int(cmdKindToApprove)
+	return cmd
+}
+
+func CmdApprovesCommand(cmdApproval, cmdAwaitingApproval Command) bool {
+	kindToApprove, ok := cmdApproval.ExtraData.(int)
+	if !ok {
+		Logger.Fatalf("Unexpected ExtraData in cmdApproval")
+	}
+	return kindToApprove == int(cmdAwaitingApproval.Kind)
 }
 
 // Syntax:
@@ -47,7 +91,7 @@ func NewInputCommand() InputCommand {
 //	challenge NAME           (where NAME is name of player whom to challenge)
 //	table_info
 
-func ParseCommandFromInput(input string) (InputCommand, error) {
+func ParseCommandFromInput(input string) (Command, error) {
 	input = strings.TrimSpace(input)
 
 	var s scanner.Scanner
@@ -75,8 +119,8 @@ func ParseCommandFromInput(input string) (InputCommand, error) {
 	return command, nil
 }
 
-func parseCommand(s *scanner.Scanner, tok rune) (rune, InputCommand, error) {
-	command := NewInputCommand()
+func parseCommand(s *scanner.Scanner, tok rune) (rune, Command, error) {
+	command := NewCommand(CmdNone)
 
 	if tok != scanner.Ident {
 		Logger.Printf("tok = %d, scanner.Ident = %d", tok, scanner.Ident)
@@ -86,10 +130,6 @@ func parseCommand(s *scanner.Scanner, tok rune) (rune, InputCommand, error) {
 	switch strings.ToLower(s.TokenText()) {
 	case "ready":
 		command.Kind = CmdDeclareReady
-		return s.Scan(), command, nil
-
-	case "arrange_and_shuffle":
-		command.Kind = CmdArrangePlayersAndShuffle
 		return s.Scan(), command, nil
 
 	case "draw":
@@ -213,20 +253,28 @@ func parseCardSequence(s *scanner.Scanner, cards []Card) (rune, []Card, error) {
 	return tok, cards, nil
 }
 
-// Connect command is of the form: connect remoteAddr myName
-func parseConnectCommand(input string) (InputCommand, error) {
-	re := regexp.MustCompile("^connect\\s+(?P<remoteAddr>.+)$")
+// Connect command is of the form: connect adminAddr
+func parseConnectCommand(input string) (Command, error) {
+	re := regexp.MustCompile("^connect\\s+(?P<adminAddr>.+)$")
 	input = strings.TrimSpace(input)
 
 	matches := re.FindStringSubmatch(input)
 	if matches == nil {
-		return InputCommand{}, errors.New("Expected a `connect <address>` command")
+		return Command{}, errors.New("Expected a `connect <address>` command")
 	}
-	remoteAddrIndex := re.SubexpIndex("remoteAddr")
-	remoteAddr := matches[remoteAddrIndex]
+	adminAddrIndex := re.SubexpIndex("adminAddr")
+	adminAddr := matches[adminAddrIndex]
 
-	cmd := NewInputCommand()
-	cmd.Kind = CmdConnect
-	cmd.ConnectAddress = remoteAddr
+	if !strings.HasPrefix(adminAddr, "http://") {
+		adminAddr = "http://" + adminAddr
+	}
+
+	cmd := NewCommand(CmdConnect)
+	cmd.ExtraData = adminAddr
 	return cmd, nil
+}
+
+func IsUserNameAllowed(name string) bool {
+	re := regexp.MustCompile(`^([[:alpha:]]|_)+$`)
+	return re.MatchString(name)
 }

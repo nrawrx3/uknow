@@ -8,25 +8,30 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[CmdDropCard-1]
-	_ = x[CmdDrawCard-2]
-	_ = x[CmdDrawCardFromPile-3]
-	_ = x[CmdQuit-4]
-	_ = x[CmdChallenge-5]
-	_ = x[CmdConnect-6]
-	_ = x[CmdTableInfo-7]
-	_ = x[CmdArrangePlayersAndShuffle-8]
-	_ = x[CmdDeclareReady-9]
+	_ = x[CmdNone-0]
+	_ = x[CmdAskUserToPlay-1]
+	_ = x[CmdDeclareReady-2]
+	_ = x[CmdDropCard-3]
+	_ = x[CmdDrawCard-4]
+	_ = x[CmdDrawCardFromPile-5]
+	_ = x[CmdChallenge-6]
+	_ = x[CmdQuit-7]
+	_ = x[CmdConnect-8]
+	_ = x[CmdTableInfo-9]
+	_ = x[CmdAddCards-10]
+	_ = x[CmdMoveCards-11]
+	_ = x[CmdSetHand-12]
+	_ = x[CmdApprove-13]
+	_ = x[CmdAddPlayer-14]
 }
 
-const _CommandKind_name = "CmdDropCardCmdDrawCardCmdDrawCardFromPileCmdQuitCmdChallengeCmdConnectCmdTableInfoCmdArrangePlayersAndShuffleCmdDeclareReady"
+const _CommandKind_name = "CmdNoneCmdAskUserToPlayCmdDeclareReadyCmdDropCardCmdDrawCardCmdDrawCardFromPileCmdChallengeCmdQuitCmdConnectCmdTableInfoCmdAddCardsCmdMoveCardsCmdSetHandCmdApproveCmdAddPlayer"
 
-var _CommandKind_index = [...]uint8{0, 11, 22, 41, 48, 60, 70, 82, 109, 124}
+var _CommandKind_index = [...]uint8{0, 7, 23, 38, 49, 60, 79, 91, 98, 108, 120, 131, 143, 153, 163, 175}
 
 func (i CommandKind) String() string {
-	i -= 1
 	if i < 0 || i >= CommandKind(len(_CommandKind_index)-1) {
-		return "CommandKind(" + strconv.FormatInt(int64(i+1), 10) + ")"
+		return "CommandKind(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
 	return _CommandKind_name[_CommandKind_index[i]:_CommandKind_index[i+1]]
 }

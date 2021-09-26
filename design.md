@@ -130,4 +130,28 @@ Let's say you have 2 clusters `C_1` and `C_2`. The player Alice is in C1 and Bob
 Have a server idiot. Replicate THAT. Not the fucking clients. Idiot.
 
 
+Server has all the game logic. Just asks player to execute a command. 
 
+
+Console - which is the "client" just executes commands based on what the gameserver decides. The gameserver will sometimes ask for player input to the console.
+
+
+
+
+## Client and server timeouts and keep_alive connections
+
+The reason most http servers in the wild, have a MaxIdleConnsPerHost > 0, is because they are
+calling some upstream service while servicing one or more incoming requests in parallel. This means
+if there 5 idle keep-alive conns present in the free list, we can use these to make 5 requests at
+most. If the situation arises where to make more than 5 requests in parallel, new conns, i.e.
+sockets have to be created to the host. Suppose that we have created 2 extra conns, so in total 7
+conns are in use. After all of them return, only 5 will be kept (maybe in an MRU fashion) in the
+free list and the rest will be closed and returned to the OS.
+
+But in a synchronous app like uknow, you would usually and by that I mean 99% of the time, not make
+multiple parallel requests to the same host. So it doesn't make sense to keep a large pool of idle
+conns for any of the hosts.
+
+Client organism
+
+Maintains state regarding - whether it can respond or not.
