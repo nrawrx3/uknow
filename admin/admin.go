@@ -6,6 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/chzyer/readline"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
@@ -13,11 +19,6 @@ import (
 	"github.com/rksht/uknow"
 	"github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
-	"log"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
 )
 
 type expectingPlayerAddedAck struct {
@@ -30,7 +31,7 @@ type Admin struct {
 	stateMutex sync.Mutex
 
 	// Address of player registed on first request
-	listenAddrOfPlayer      map[string]string
+	listenAddrOfPlayer      map[string]utils.TCPAddress
 	shuffler                string
 	state                   GameState
 	httpClient              *http.Client
@@ -41,15 +42,15 @@ type Admin struct {
 }
 
 type ConfigNewAdmin struct {
-	HttpListenAddr string
-	State          GameState
-	Table          *uknow.Table
+	ListenAddr utils.TCPAddress
+	State      GameState
+	Table      *uknow.Table
 }
 
 func NewAdmin(config *ConfigNewAdmin) *Admin {
 	admin := &Admin{
 		table:              uknow.NewAdminTable(),
-		listenAddrOfPlayer: make(map[string]string),
+		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
 		shuffler:           "",
 		state:              StatusAddingPlayers,
 		expectingAcks:      make([]expectingPlayerAddedAck, 0, 64),
@@ -62,12 +63,13 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 
 	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
 	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
+	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
 	r.Path("/test_command").Methods("POST")
 	utils.RoutesSummary(r, admin.logger)
 
 	admin.httpServer = &http.Server{
 		Handler:           r,
-		Addr:              config.HttpListenAddr,
+		Addr:              config.ListenAddr.String(),
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      5 * time.Second,
 		IdleTimeout:       1 * time.Minute,
@@ -79,8 +81,11 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 
 func (admin *Admin) RunServer() {
 	admin.logger.Printf("Running admin server at addr: %s", admin.httpServer.Addr)
-	go admin.runExpectinPlayersCheck()
-	admin.httpServer.ListenAndServe()
+	go admin.runExpectingPlayersCheck()
+	err := admin.httpServer.ListenAndServe()
+	if err != nil {
+		log.Fatalf("Admin.RunServer() failed: %s", err.Error())
+	}
 }
 
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
@@ -115,7 +120,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newPlayerName := msg.PlayerNames[0]
-	newPlayerHostAddr := msg.ClientListenAddrs[0]
+	newPlayerListenAddr := msg.ClientListenAddrs[0]
 
 	err = admin.table.AddPlayer(newPlayerName)
 	if errors.Is(err, uknow.PlayerAlreadyExists) {
@@ -129,11 +134,11 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		admin.logger.Fatalf("Cannot add new player: %s", err)
 	}
 
-	admin.listenAddrOfPlayer[newPlayerName] = newPlayerHostAddr
+	admin.listenAddrOfPlayer[newPlayerName] = newPlayerListenAddr
 	admin.shuffler = newPlayerName
 
 	// Tell existing players about the new player
-	newPlayerHost, newPlayerPort, err := utils.ResolveTCPAddress(newPlayerHostAddr)
+	newPlayerHost, newPlayerPort, err := utils.ResolveTCPAddress(newPlayerListenAddr.String())
 	if err != nil {
 		admin.logger.Printf("Invalid newPlayerHostAddr: %s", err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -151,7 +156,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		admin.logger.Printf("Telling '%s' at %s about new player %s", playerName, playerListenAddr, newPlayerName)
-		host, port, err := utils.ResolveTCPAddress(playerListenAddr)
+		host, port, err := utils.ResolveTCPAddress(playerListenAddr.String())
 		if err != nil {
 			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
@@ -184,7 +189,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 		playerName := playerName
 
 		g.Go(func() error {
-			url := playerListenAddr + "/player"
+			url := playerListenAddr.HTTPAddress() + "/player"
 			req, err := http.NewRequestWithContext(ctx, "POST", url, utils.JSONReader(&addPlayerMsg))
 			if err != nil {
 				return err
@@ -220,7 +225,10 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	admin.logger.Printf("TODO: handleAckNewPlayerAdded")
 }
 
-func (admin *Admin) runExpectinPlayersCheck() {
+func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
+}
+
+func (admin *Admin) runExpectingPlayersCheck() {
 	for ack := range admin.newExpectingAckReceived {
 		admin.stateMutex.Lock()
 
@@ -314,7 +322,7 @@ func RunAPP() {
 	}
 
 	config := &ConfigNewAdmin{}
-	config.HttpListenAddr = utils.ConcatHostPort("http", envConfig.ListenAddr, envConfig.ListenPort)
+	config.ListenAddr = utils.TCPAddress{Host: envConfig.ListenAddr, Port: envConfig.ListenPort}
 	config.State = StatusAddingPlayers
 	config.Table = uknow.NewAdminTable()
 

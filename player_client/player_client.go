@@ -101,7 +101,8 @@ type ConfigNewPlayerClient struct {
 	DefaultCommandReceiverChan <-chan uknow.Command
 	LogWindowChan              chan<- string
 	Table                      *uknow.Table
-	HttpListenAddr             string
+	// HttpListenAddr             string
+	ListenAddr utils.TCPAddress
 }
 
 func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
@@ -123,7 +124,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 	c.initRouterHandlers()
 
 	c.httpServer = &http.Server{
-		Addr:    config.HttpListenAddr,
+		Addr:    config.ListenAddr.String(),
 		Handler: c.router,
 	}
 
@@ -134,7 +135,7 @@ func (c *PlayerClient) RunServer() {
 	c.logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
 	err := c.httpServer.ListenAndServe()
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Fatalf("PlayerClient.RunServer() failed: %s", err.Error())
 	}
 }
 
@@ -455,7 +456,7 @@ func (c *PlayerClient) initRouterHandlers() {
 }
 
 // Connects to each player as given in playerNames and playerListenAddrs
-func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames, playerListenAddrs []string) {
+func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.TCPAddress) {
 	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminListenAddr)
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -471,10 +472,10 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames, pla
 			}
 
 			listenAddr := playerListenAddrs[i]
-			pingURL := fmt.Sprintf("%s/ping", listenAddr)
+			pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddress())
 			_, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "GET", pingURL, nil)
 			if err != nil {
-				c.logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr, err)
+				c.logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddress(), err)
 				return errorFailedToConnectToNewPlayer
 			}
 

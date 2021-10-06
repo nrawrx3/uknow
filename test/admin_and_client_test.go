@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/rksht/uknow"
 	admin "github.com/rksht/uknow/admin"
 	"github.com/rksht/uknow/internal/utils"
@@ -30,7 +29,7 @@ func setupClientConfigs(names []string) map[string]configAndChannels {
 	for i, name := range names {
 		commChannels := client.MakeCommChannels()
 		clientConfig := &client.ConfigNewPlayerClient{}
-		clientConfig.HttpListenAddr = fmt.Sprintf("localhost:%d", 9000+i)
+		clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9000 + i}
 		clientConfig.LogWindowChan = commChannels.LogWindowChan
 		clientConfig.AskUIForUserTurnChan = commChannels.AskUIForUserTurnChan
 		clientConfig.DefaultCommandReceiverChan = commChannels.DefaultCommandReceiveChan
@@ -51,7 +50,7 @@ func setupConfig() *Configs {
 	// Create a single client and an admin
 	commChannels := client.MakeCommChannels()
 	clientConfig := &client.ConfigNewPlayerClient{}
-	clientConfig.HttpListenAddr = "localhost:9000"
+	clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9000}
 	clientConfig.LogWindowChan = commChannels.LogWindowChan
 	clientConfig.AskUIForUserTurnChan = commChannels.AskUIForUserTurnChan
 	clientConfig.DefaultCommandReceiverChan = commChannels.DefaultCommandReceiveChan
@@ -60,7 +59,7 @@ func setupConfig() *Configs {
 
 	adminConfig := &admin.ConfigNewAdmin{}
 	adminConfig.State = admin.StatusAddingPlayers
-	adminConfig.HttpListenAddr = "localhost:9010"
+	adminConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9010}
 	adminConfig.Table = uknow.NewAdminTable()
 
 	return &Configs{
@@ -97,7 +96,7 @@ func TestAddNewPlayer(t *testing.T) {
 	// Send a connect command to the client default channel. Let it call the admin and add itself to the
 	// admin
 	cmd := uknow.NewCommand(uknow.CmdConnect)
-	cmd.ExtraData = "http://" + configs.adminConfig.HttpListenAddr
+	cmd.ExtraData = configs.adminConfig.ListenAddr.HTTPAddress()
 
 	t.Log("Sending connect command to client")
 	t.Logf("Command receive chan from test: %v", configs.commChannels.DefaultCommandReceiveChan)
@@ -115,7 +114,7 @@ func TestAddMultiplePlayers(t *testing.T) {
 
 	adminConfig := &admin.ConfigNewAdmin{}
 	adminConfig.State = admin.StatusAddingPlayers
-	adminConfig.HttpListenAddr = "localhost:9010"
+	adminConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9010}
 	adminConfig.Table = uknow.NewAdminTable()
 
 	admin := admin.NewAdmin(adminConfig)
@@ -139,7 +138,7 @@ func TestAddMultiplePlayers(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	connectCmd := uknow.NewCommand(uknow.CmdConnect)
-	connectCmd.ExtraData = "http://" + adminConfig.HttpListenAddr
+	connectCmd.ExtraData = adminConfig.ListenAddr.HTTPAddress()
 
 	// Connect alice to admin
 	clientConfigMap[aliceName].commChannels.DefaultCommandReceiveChan <- connectCmd
@@ -153,7 +152,7 @@ func TestAddMultiplePlayers(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// jack should now have connected to alice also
-	jackURL := "http://" + clientConfigMap[jackName].clientConfig.HttpListenAddr
+	jackURL := clientConfigMap[jackName].clientConfig.ListenAddr.HTTPAddress()
 	resp, err := http.Get(jackURL + "/players")
 
 	t.Log("Received response from jack")

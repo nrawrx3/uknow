@@ -12,6 +12,33 @@ import (
 	"time"
 )
 
+type TCPAddress struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+func trimProtocolPrefix(addr string) string {
+	addr = strings.TrimPrefix(addr, "udp://")
+	addr = strings.TrimPrefix(addr, "tcp://")
+	addr = strings.TrimPrefix(addr, "https://")
+	addr = strings.TrimPrefix(addr, "http://")
+	return addr
+}
+
+func (t *TCPAddress) SetHostPort(host string, port int) {
+	host = trimProtocolPrefix(host)
+	t.Host = host
+	t.Port = port
+}
+
+func (t *TCPAddress) HTTPAddress() string {
+	return fmt.Sprintf("http://%s:%d", t.Host, t.Port)
+}
+
+func (t *TCPAddress) String() string {
+	return fmt.Sprintf("%s:%d", t.Host, t.Port)
+}
+
 func CreateFileLogger(setAsDefault bool, playerName string) *log.Logger {
 	fileName := fmt.Sprintf("/tmp/%s_log.txt", playerName)
 	f, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)

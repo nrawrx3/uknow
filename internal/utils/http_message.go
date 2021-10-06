@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/rksht/uknow"
 	"io"
 	"log"
+
+	"github.com/rksht/uknow"
 )
 
 type CommandPayload struct {
@@ -27,8 +28,8 @@ func DecodeCommandPayload(r io.Reader) (CommandPayload, error) {
 }
 
 type AddNewPlayersMessage struct {
-	PlayerNames       []string `json:"player_names"`
-	ClientListenAddrs []string `json:"client_listen_addrs"`
+	PlayerNames       []string     `json:"player_names"`
+	ClientListenAddrs []TCPAddress `json:"client_listen_addrs"`
 }
 
 func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clientPort int) *AddNewPlayersMessage {
@@ -37,11 +38,11 @@ func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clien
 	}
 
 	if msg.ClientListenAddrs == nil {
-		msg.ClientListenAddrs = make([]string, 0, 4)
+		msg.ClientListenAddrs = make([]TCPAddress, 0, 4)
 	}
 
 	msg.PlayerNames = append(msg.PlayerNames, playerName)
-	msg.ClientListenAddrs = append(msg.ClientListenAddrs, ConcatHostPort("http", clientHost, clientPort))
+	msg.ClientListenAddrs = append(msg.ClientListenAddrs, TCPAddress{clientHost, clientPort})
 	return msg
 }
 
