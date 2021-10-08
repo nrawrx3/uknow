@@ -24,6 +24,7 @@ import (
 type expectingPlayerAddedAck struct {
 	connectingPlayer string
 	connecteePlayer  string
+	deadline         time.Time
 }
 
 type Admin struct {
@@ -63,7 +64,6 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 
 	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
 	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
-	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
 	r.Path("/test_command").Methods("POST")
 	utils.RoutesSummary(r, admin.logger)
 
@@ -90,6 +90,9 @@ func (admin *Admin) RunServer() {
 
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 const perPlayerSyncCommandTimeout = time.Duration(5) * time.Second
+
+var errorWaitingForAcks = errors.New("waiting for acks")
+var errorTimeoutAcks = errors.New("some acks timed out")
 
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
@@ -155,7 +158,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		admin.logger.Printf("Telling '%s' at %s about new player %s", playerName, playerListenAddr, newPlayerName)
+		admin.logger.Printf("Telling '%s' at %s about new player %s", playerName, playerListenAddr.String(), newPlayerName)
 		host, port, err := utils.ResolveTCPAddress(playerListenAddr.String())
 		if err != nil {
 			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
@@ -204,6 +207,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 			admin.expectingAcks = append(admin.expectingAcks, expectingPlayerAddedAck{
 				connectingPlayer: playerName,
 				connecteePlayer:  newPlayerName,
+				deadline:         time.Now().Add(10 * time.Second),
 			})
 			admin.stateMutex.Unlock()
 
@@ -225,9 +229,6 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	admin.logger.Printf("TODO: handleAckNewPlayerAdded")
 }
 
-func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
-}
-
 func (admin *Admin) runExpectingPlayersCheck() {
 	for ack := range admin.newExpectingAckReceived {
 		admin.stateMutex.Lock()
@@ -240,6 +241,31 @@ func (admin *Admin) runExpectingPlayersCheck() {
 
 		admin.stateMutex.Unlock()
 	}
+}
+
+func (admin *Admin) setReady() error {
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	timeoutAcks := make([]expectingPlayerAddedAck, 0)
+
+	for _, existingAck := range admin.expectingAcks {
+		if time.Now().After(existingAck.deadline) {
+			timeoutAcks = append(timeoutAcks, existingAck)
+		}
+	}
+
+	if len(timeoutAcks) > 0 {
+		return errorTimeoutAcks
+	}
+
+	if len(admin.expectingAcks) > 0 {
+		return errorWaitingForAcks
+	}
+
+	admin.state = StatusShouldShuffle
+
+	return nil
 }
 
 type GameState string
@@ -294,6 +320,12 @@ func (admin *Admin) RunREPL() {
 			admin.logger.Print(err)
 		}
 
+		if line == "set_ready" || line == "sr" {
+			err := admin.setReady()
+			if err != nil {
+				fmt.Print(err)
+			}
+		}
 	}
 }
 

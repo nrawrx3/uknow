@@ -173,5 +173,10 @@ func TestAddMultiplePlayers(t *testing.T) {
 		t.FailNow()
 	}
 
-	t.Logf("alice GET /players response: %+v", respMessage)
+	t.Logf("jack GET /players response: %+v", respMessage)
+
+	if _, aliceExists := respMessage.ListenAddrOfPlayer[aliceName]; !aliceExists {
+		t.Logf("%s does not exist in jack's ListenAddrOfPlayer", aliceName)
+		t.Fail()
+	}
 }

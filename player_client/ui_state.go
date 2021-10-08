@@ -166,7 +166,7 @@ func (uiState *UIState) initWidgetObjects() {
 	uiState.commandHistory = make([]string, 0, 64)
 }
 
-func (uiState *UIState) init(debugFlags DebugFlags, askUIForUserTurnChan <-chan askUIForUserTurnArgs, logWindowChan <-chan string) {
+func (uiState *UIState) Init(debugFlags DebugFlags, askUIForUserTurnChan <-chan askUIForUserTurnArgs, logWindowChan <-chan string) {
 	if err := ui.Init(); err != nil {
 		log.Fatalf("Failed to initialized termui: %v", err)
 	}
@@ -198,7 +198,7 @@ func (uiState *UIState) init(debugFlags DebugFlags, askUIForUserTurnChan <-chan 
 }
 
 // Runs in own thread
-func (uiState *UIState) pollInputEvents(defaultCommandReceiverChan chan<- uknow.Command) {
+func (uiState *UIState) RunPollInputEvents(defaultCommandReceiverChan chan<- uknow.Command) {
 	defer func() {
 		uknow.Logger.Printf("Event loop exits\n")
 	}()
@@ -267,7 +267,7 @@ func (uiState *UIState) pollInputEvents(defaultCommandReceiverChan chan<- uknow.
 }
 
 // Runs in own thread.
-func (uiState *UIState) drawLoop() {
+func (uiState *UIState) RunDrawLoop() {
 	ui.Render(uiState.grid)
 	for i := 0; ; i++ {
 		uiState.actionCond.L.Lock()

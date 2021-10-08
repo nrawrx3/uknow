@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewDeckHas104Cards(t *testing.T) {
-	table := NewTable([]string{"buttstallion", "handsomejack"}, "handsomejack")
+	table := NewTable("nutterbutter")
 
 	log.Printf("Table created, new deck len = %d", len(table.DrawDeck))
 
