@@ -47,7 +47,7 @@ func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clien
 }
 
 type GetPlayersMessage struct {
-	ListenAddrOfPlayer map[string]string `json:"listen_addr_of_player"`
+	ListenAddrOfPlayer map[string]TCPAddress `json:"listen_addr_of_player"`
 }
 
 type AckNewPlayerAddedMessage struct {

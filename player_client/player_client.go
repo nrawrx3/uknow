@@ -25,7 +25,7 @@ func maxInt(a, b int) int {
 	return b
 }
 
-type ClusterMap map[string]string // Map of player name to their public address
+type ClusterMap map[string]utils.TCPAddress // Map of player name to their public address
 
 const userDecisionTimeout = time.Duration(10) * time.Second
 
@@ -298,6 +298,8 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlaye
 			// TODO: Handle respMsg - connect to each player in the cluster
 			c.adminListenAddr = adminAddr
 			c.logger.Printf("Will connect to currently existing players: %+v", respMsg)
+
+			go c.connectToEachPlayer(ctx, respMsg.PlayerNames, respMsg.ClientListenAddrs)
 		}
 	default:
 		c.logger.Fatalf("connectToAdmin: Unexpected response: %s", resp.Status)
@@ -480,15 +482,21 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 				return errorFailedToConnectToNewPlayer
 			}
 
+			c.neighborListenAddr[playerName] = listenAddr
+
+			c.logger.Printf("Successfully connected to %s, will send ack to admin", playerName)
+
 			ackMsg := utils.AckNewPlayerAddedMessage{
 				ConnectingPlayer: c.table.LocalPlayerName,
 				ConnectedPlayer:  playerName,
 			}
 
 			playerName := playerName
-			_, err = utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "POST", adminURL, utils.JSONReader(&ackMsg))
+			resp, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "POST", adminURL, utils.JSONReader(&ackMsg))
 			if err != nil {
 				c.logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
+			} else {
+				c.logger.Printf("Ack successful: %s", resp.Status)
 			}
 			return err
 		})

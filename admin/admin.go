@@ -90,6 +90,7 @@ func (admin *Admin) RunServer() {
 
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 const perPlayerSyncCommandTimeout = time.Duration(5) * time.Second
+const addNewPlayerAckTimeout = time.Duration(10) * time.Second
 
 var errorWaitingForAcks = errors.New("waiting for acks")
 var errorTimeoutAcks = errors.New("some acks timed out")
@@ -171,6 +172,17 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 	admin.logger.Printf("Telling %s about existing players: %+v", newPlayerName, responseMsg)
 
+	// Add expecting acks for the new player to send to the admin
+	for playerName := range admin.listenAddrOfPlayer {
+		if playerName == newPlayerName {
+			continue
+		}
+		admin.expectingAcks = append(admin.expectingAcks, expectingPlayerAddedAck{
+			connectingPlayer: newPlayerName,
+			connecteePlayer:  playerName,
+			deadline:         time.Now().Add(addNewPlayerAckTimeout),
+		})
+	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(responseMsg)
 }
@@ -198,6 +210,8 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 				return err
 			}
 
+			admin.logger.Printf("Telling %s about %s", playerName, newPlayerName)
+
 			_, err = admin.httpClient.Do(req)
 			if err != nil {
 				return err
@@ -207,7 +221,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 			admin.expectingAcks = append(admin.expectingAcks, expectingPlayerAddedAck{
 				connectingPlayer: playerName,
 				connecteePlayer:  newPlayerName,
-				deadline:         time.Now().Add(10 * time.Second),
+				deadline:         time.Now().Add(addNewPlayerAckTimeout),
 			})
 			admin.stateMutex.Unlock()
 
@@ -225,10 +239,6 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 
 }
 
-func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Request) {
-	admin.logger.Printf("TODO: handleAckNewPlayerAdded")
-}
-
 func (admin *Admin) runExpectingPlayersCheck() {
 	for ack := range admin.newExpectingAckReceived {
 		admin.stateMutex.Lock()
@@ -241,6 +251,27 @@ func (admin *Admin) runExpectingPlayersCheck() {
 
 		admin.stateMutex.Unlock()
 	}
+}
+
+func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Request) {
+	var reqBody utils.AckNewPlayerAddedMessage
+	err := json.NewDecoder(r.Body).Decode(&reqBody)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		utils.WriteErrorPayload(w, err)
+		return
+	}
+
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	// Find and remove from this ack from the expectingAcks list
+	for i, ack := range admin.expectingAcks {
+		if ack.connecteePlayer == reqBody.ConnectedPlayer && ack.connectingPlayer == reqBody.ConnectingPlayer {
+			admin.expectingAcks = append(admin.expectingAcks[0:i], admin.expectingAcks[(i+1):len(admin.expectingAcks)]...)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (admin *Admin) setReady() error {
