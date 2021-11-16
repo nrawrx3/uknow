@@ -79,7 +79,7 @@ func WriteErrorPayload(w io.Writer, err error) {
 	json.NewEncoder(w).Encode(&UnwrappedErrorPayload)
 }
 
-func JSONReader(v interface{}) io.Reader {
+func MustJSONReader(v interface{}) io.Reader {
 	var b bytes.Buffer
 	err := json.NewEncoder(&b).Encode(v)
 

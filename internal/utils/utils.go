@@ -61,15 +61,18 @@ func ConcatHostPort(protocol string, host string, port int) string {
 	return fmt.Sprintf("%s://%s:%d", protocol, host, port)
 }
 
-func ResolveTCPAddress(addr string) (host string, port int, err error) {
+func ResolveTCPAddress(addr string) (TCPAddress, error) {
 	addr = strings.TrimPrefix(addr, "http://")
 	addr = strings.TrimPrefix(addr, "https://")
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return "", 0, err
+		return TCPAddress{}, err
 	}
-	return tcpAddr.IP.String(), tcpAddr.Port, nil
+	return TCPAddress{
+		Host: tcpAddr.IP.String(),
+		Port: tcpAddr.Port,
+	}, nil
 }
 
 func CreateHTTPClient() *http.Client {

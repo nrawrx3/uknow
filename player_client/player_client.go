@@ -249,12 +249,12 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 
 			var msg utils.AddNewPlayersMessage
 
-			listenHost, listenPort, err := utils.ResolveTCPAddress(c.httpServer.Addr)
+			listenAddr, err := utils.ResolveTCPAddress(c.httpServer.Addr)
 			if err != nil {
 				c.logger.Fatal(err)
 			}
 
-			msg.Add(c.table.LocalPlayerName, listenHost, listenPort)
+			msg.Add(c.table.LocalPlayerName, listenAddr.Host, listenAddr.Port)
 
 			c.stateMutex.Lock()
 			c.connectToAdmin(ctx, msg, adminAddr)
@@ -492,7 +492,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			}
 
 			playerName := playerName
-			resp, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "POST", adminURL, utils.JSONReader(&ackMsg))
+			resp, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "POST", adminURL, utils.MustJSONReader(&ackMsg))
 			if err != nil {
 				c.logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
 			} else {

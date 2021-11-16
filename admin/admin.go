@@ -64,6 +64,7 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 
 	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
 	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
+	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
 	r.Path("/test_command").Methods("POST")
 	utils.RoutesSummary(r, admin.logger)
 
@@ -142,15 +143,15 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	admin.shuffler = newPlayerName
 
 	// Tell existing players about the new player
-	newPlayerHost, newPlayerPort, err := utils.ResolveTCPAddress(newPlayerListenAddr.String())
+	newPlayerAddr, err := utils.ResolveTCPAddress(newPlayerListenAddr.String())
 	if err != nil {
 		admin.logger.Printf("Invalid newPlayerHostAddr: %s", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerHost, newPlayerPort)
+	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerAddr.Host, newPlayerAddr.Port)
 
-	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerHost, newPlayerPort)
+	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerAddr.Host, newPlayerAddr.Port)
 
 	// Tell the new player about existing players
 	var responseMsg utils.AddNewPlayersMessage
@@ -160,14 +161,14 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		admin.logger.Printf("Telling '%s' at %s about new player %s", playerName, playerListenAddr.String(), newPlayerName)
-		host, port, err := utils.ResolveTCPAddress(playerListenAddr.String())
+		addr, err := utils.ResolveTCPAddress(playerListenAddr.String())
 		if err != nil {
 			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
 			utils.WriteErrorPayload(w, err)
 			continue
 		}
-		responseMsg.Add(playerName, host, port)
+		responseMsg.Add(playerName, addr.Host, addr.Port)
 	}
 
 	admin.logger.Printf("Telling %s about existing players: %+v", newPlayerName, responseMsg)
@@ -205,7 +206,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 
 		g.Go(func() error {
 			url := playerListenAddr.HTTPAddress() + "/player"
-			req, err := http.NewRequestWithContext(ctx, "POST", url, utils.JSONReader(&addPlayerMsg))
+			req, err := http.NewRequestWithContext(ctx, "POST", url, utils.MustJSONReader(&addPlayerMsg))
 			if err != nil {
 				return err
 			}
@@ -272,6 +273,34 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
+	senderAddr, err := utils.ResolveTCPAddress(r.RemoteAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// IMPROVE(@rk): Use password?
+
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	if admin.state != StatusAddingPlayers || len(admin.expectingAcks) != 0 {
+		w.WriteHeader(http.StatusForbidden)
+	}
+
+	// Search player name
+	for playerName, listenAddr := range admin.listenAddrOfPlayer {
+		if listenAddr == senderAddr {
+			if playerName == admin.shuffler {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+		}
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 
 func (admin *Admin) setReady() error {
