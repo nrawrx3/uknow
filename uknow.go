@@ -170,24 +170,16 @@ func (d Deck) RemoveCard(index int) Deck {
 
 type State int
 
-//go:generate stringer -type=State
-const (
-	StateBeforeReady State = iota
-	StateWaitForCommand
-	StateWaitForDraw
-)
-
 type Table struct {
-	DrawDeck         Deck
-	Pile             Deck
-	State            State
-	IndexOfPlayer    map[string]int
-	HandOfPlayer     map[string]Deck
-	PlayerNames      StringSlice
-	LocalPlayerName  string
-	ShufflerName     string
-	NextPlayerToDraw string
-	Direction        int
+	DrawDeck         Deck            `json:"draw_deck"`
+	Pile             Deck            `json:"pile"`
+	IndexOfPlayer    map[string]int  `json:"index_of_player"`
+	HandOfPlayer     map[string]Deck `json:"hand_of_player"`
+	PlayerNames      StringSlice     `json:"player_names"`
+	LocalPlayerName  string          `json:"local_player_name"`
+	ShufflerName     string          `json:"shuffler_name"`
+	NextPlayerToDraw string          `json:"next_player_to_draw"`
+	Direction        int             `json:"direction"`
 }
 
 func NewTable(localPlayerName string) *Table {
@@ -205,7 +197,6 @@ func createNewTable() *Table {
 	return &Table{
 		DrawDeck:      NewFullDeck(),
 		Pile:          NewEmptyDeck(),
-		State:         StateBeforeReady,
 		HandOfPlayer:  make(map[string]Deck),
 		IndexOfPlayer: make(map[string]int),
 		PlayerNames:   make([]string, 0, 16),
@@ -277,7 +268,7 @@ func (t *Table) RearrangePlayerIndices(indices []int) {
 }
 
 // This is one of the only moments where we have to communicate the shuffled indices
-func (t *Table) ShuffleDeckAndDistribute(shufflerName string) []int {
+func (t *Table) ShuffleDeckAndDistribute() {
 	deckSize := len(t.DrawDeck)
 	shuffledIndices := ShuffleIntRange(0, deckSize)
 
@@ -293,9 +284,8 @@ func (t *Table) ShuffleDeckAndDistribute(shufflerName string) []int {
 		t.Direction = -t.Direction
 	}
 
-	indexOfNextPlayer := t.GetNextPlayerIndex(t.IndexOfPlayer[shufflerName], 1)
+	indexOfNextPlayer := t.GetNextPlayerIndex(t.IndexOfPlayer[t.ShufflerName], 1)
 	t.NextPlayerToDraw = t.PlayerNames[indexOfNextPlayer]
-	return shuffledIndices
 }
 
 // func (p *Player) PullCard(t *Table) (Card, error) {

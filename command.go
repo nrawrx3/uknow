@@ -41,7 +41,8 @@ const (
 	CmdAddCards
 	CmdMoveCards
 	CmdSetHand
-	CmdApprove // Only sent by admin to client
+	CmdApprove           // Only sent by admin to client
+	CmdSyncShuffledCards // Only sent by admin to client
 
 	// Add player - admin asks players to add these to their local table
 	CmdAddPlayer

@@ -86,7 +86,6 @@ func CreateHTTPClient() *http.Client {
 		Timeout:   2 * time.Second,
 		Transport: transport,
 	}
-
 }
 
 func MakeHTTPRequestWithTimeout(
@@ -95,8 +94,10 @@ func MakeHTTPRequestWithTimeout(
 	timeout time.Duration,
 	method, url string,
 	bodyReader io.Reader) (*http.Response, error) {
+
 	ctx, cancel := context.WithTimeout(parentContext, timeout)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bodyReader)
 	resp, err := client.Do(req)
 	return resp, err

@@ -155,3 +155,7 @@ conns for any of the hosts.
 Client organism
 
 Maintains state regarding - whether it can respond or not.
+
+Yes some commands can be approved by the client itself. Should we think about this on a command by command basis? What about a challenge?
+
+That puts the admin in an executing-commands state. Every game-command is a state modifier. So it makes sense to route these through the admin.

@@ -92,6 +92,7 @@ func (admin *Admin) RunServer() {
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 const perPlayerSyncCommandTimeout = time.Duration(5) * time.Second
 const addNewPlayerAckTimeout = time.Duration(10) * time.Second
+const askUserToPlayTimeout = time.Duration(20) * time.Second
 
 var errorWaitingForAcks = errors.New("waiting for acks")
 var errorTimeoutAcks = errors.New("some acks timed out")
@@ -295,12 +296,81 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		if listenAddr == senderAddr {
 			if playerName == admin.shuffler {
 				w.WriteHeader(http.StatusOK)
+				go admin.shuffleAndStartGame()
 			} else {
 				w.WriteHeader(http.StatusUnauthorized)
 			}
 		}
 	}
 	w.WriteHeader(http.StatusNotFound)
+}
+
+func (admin *Admin) shuffleAndStartGame() {
+	admin.logger.Printf("called admin.shuffleAndStartGame")
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	admin.state = StatusShouldShuffle
+
+	admin.table.ShuffleDeckAndDistribute()
+	cmd := uknow.NewCommand(uknow.CmdSyncShuffledCards)
+	cmd.ExtraData = admin.table // TODO(@rk): Maybe only send the necessary fields (which are, admittedly, most fields of this struct)
+
+	ctxForAllRequests, cancelFunc := context.WithTimeout(context.Background(), allPlayersSyncCommandTimeout)
+	defer cancelFunc()
+	g, ctx := errgroup.WithContext(ctxForAllRequests)
+
+	for playerName, listenAddr := range admin.listenAddrOfPlayer {
+		listenAddr := listenAddr
+		playerName := playerName
+
+		g.Go(func() error {
+			url := listenAddr.HTTPAddress() + "/command"
+			req, err := http.NewRequestWithContext(ctx, "POST", url, utils.MustJSONReader(&cmd))
+			if err != nil {
+				return err
+			}
+
+			admin.logger.Printf("Syncing shuffled cards with %s", playerName)
+
+			_, err = admin.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+	}
+
+	err := g.Wait()
+	if err != nil {
+		admin.logger.Printf("Done syncing shuffled cards")
+		go admin.startGameLoop()
+	} else {
+		admin.logger.Printf("Failed to sync shuffled cards: %s", err)
+	}
+}
+
+func (admin *Admin) playerCommandURL(playerName string) string {
+	listenAddr := admin.listenAddrOfPlayer[playerName]
+	return listenAddr.HTTPAddress() + "/command"
+}
+
+func (admin *Admin) startGameLoop() {
+	// Ask next player for turn
+	player := admin.table.NextPlayerToDraw
+	cmd := uknow.NewCommand(uknow.CmdAskUserToPlay)
+
+	commandPayload := utils.CommandPayload{
+		SenderName:   uknow.ReservedNameAdmin,
+		Command:      cmd,
+		IsResponse:   false,
+		NeedApproval: true,
+	}
+
+	resp, err := utils.MakeHTTPRequestWithTimeout(context.Background(), admin.httpClient, askUserToPlayTimeout, "POST", admin.playerCommandURL(player), utils.MustJSONReader(&commandPayload))
+	if err != nil {
+	}
 }
 
 func (admin *Admin) setReady() error {
@@ -335,22 +405,6 @@ const (
 	StatusShouldShuffle           = "status_should_shuffle"
 	StatusRoundStart              = "status_round_start"
 )
-
-// func (admin *Admin) ExecuteTurn() {
-// 	topPileCard, err := admin.table.Pile.Top()
-// 	if err != nil {
-// 		admin.logger.Fatal(err)
-// 	}
-
-// 	if topPileCard.Number == uknow.CardReverse {
-// 		admin.table.Direction = admin.table.Direction * -1
-// 		admin.NotifyReverse()
-// 		admin.ExecuteTurn()
-// 	}
-// }
-
-// func (admin *Admin) NotifyReverse() {
-// }
 
 type EnvConfig struct {
 	ListenAddr string `envconfig:"ADMIN_LISTEN_ADDR" required:"true"`

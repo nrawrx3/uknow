@@ -11,10 +11,14 @@ import (
 )
 
 type CommandPayload struct {
-	SenderName   string        `json:"sender_name"`
-	Command      uknow.Command `json:"command"`
-	IsResponse   bool          `json:"is_response"`
-	NeedApproval bool          `json:"need_approval"`
+	SenderName string        `json:"sender_name"`
+	Command    uknow.Command `json:"command"`
+	IsResponse bool          `json:"is_response"`
+
+	// For user decision commands, the admin is responsible for validating the play made by the player-client.
+	// NeedApproval is set to true for such cases. After the user decides the play, the player client
+	// waits until it gets approval from the admin.
+	NeedApproval bool `json:"need_approval"`
 }
 
 func DecodeCommandPayload(r io.Reader) (CommandPayload, error) {
