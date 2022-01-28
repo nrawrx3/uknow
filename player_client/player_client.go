@@ -29,26 +29,26 @@ type ClusterMap map[string]utils.TCPAddress // Map of player name to their publi
 
 const userDecisionTimeout = time.Duration(10) * time.Second
 
-func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
-	if excludePlayers == nil {
-		excludePlayers = []string{}
-	}
+// func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
+// 	if excludePlayers == nil {
+// 		excludePlayers = []string{}
+// 	}
 
-	cloned := make(ClusterMap)
-	for k, v := range c {
-		exclude := false
-		for _, e := range excludePlayers {
-			if e == k {
-				exclude = true
-				break
-			}
-		}
-		if !exclude {
-			cloned[k] = v
-		}
-	}
-	return cloned
-}
+// 	cloned := make(ClusterMap)
+// 	for k, v := range c {
+// 		exclude := false
+// 		for _, e := range excludePlayers {
+// 			if e == k {
+// 				exclude = true
+// 				break
+// 			}
+// 		}
+// 		if !exclude {
+// 			cloned[k] = v
+// 		}
+// 	}
+// 	return cloned
+// }
 
 type askUIForUserTurnArgs struct {
 	receive               chan<- uknow.Command
@@ -65,9 +65,9 @@ const (
 	clientStateAwaitingAdminApproval             = "awaiting_admin_approval"
 )
 
-var errorClientAwaitingApproval = errors.New("Client awaiting approval of previous command")
-var errorClientUnexpectedSender = errors.New("Unexpected sender")
-var errorFailedToConnectToNewPlayer = errors.New("Failed to connect to new player")
+var ErrorClientAwaitingApproval = errors.New("Client awaiting approval of previous command")
+var ErrorClientUnexpectedSender = errors.New("Unexpected sender")
+var ErrorFailedToConnectToNewPlayer = errors.New("Failed to connect to new player")
 
 type PlayerClient struct {
 	// Used to protect the non-gui state
@@ -101,6 +101,7 @@ type ConfigNewPlayerClient struct {
 	AskUIForUserTurnChan       chan<- askUIForUserTurnArgs
 	DefaultCommandReceiverChan <-chan uknow.Command
 	LogWindowChan              chan<- string
+	TestErrorChan              chan<- error
 	Table                      *uknow.Table
 	// HttpListenAddr             string
 	ListenAddr utils.TCPAddress
@@ -156,7 +157,7 @@ func (c *PlayerClient) handleAdminCommand(ctx context.Context, senderName string
 	var res handleAdminCommandResult
 
 	if c.cmdAwaitingApproval.Kind != uknow.CmdNone {
-		return res, errorClientAwaitingApproval
+		return res, ErrorClientAwaitingApproval
 	}
 
 	switch cmd.Kind {
@@ -313,12 +314,10 @@ func (c *PlayerClient) printTableInfo(uiState *UIState) {
 	}
 
 	msg := fmt.Sprintf(`
-State:		%s,
 Players:	%+v,
 Hand counts:	%+v,
 DrawDeck count: %+v,
 DiscardPile count: %+v`,
-		c.table.State,
 		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
 	uiState.appendEventLog(msg)
 	c.logger.Printf(msg)
@@ -402,7 +401,7 @@ func (c *PlayerClient) initRouterHandlers() {
 
 		w.WriteHeader(http.StatusForbidden)
 		errorPayload := utils.UnwrappedErrorPayload{}
-		errorPayload.Add(errorClientUnexpectedSender)
+		errorPayload.Add(ErrorClientUnexpectedSender)
 		json.NewEncoder(w).Encode(&errorPayload)
 
 		// Handle non-admin player command
@@ -452,7 +451,6 @@ func (c *PlayerClient) initRouterHandlers() {
 
 	c.router.Path("/ping").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "pong")
-		w.WriteHeader(http.StatusOK)
 	})
 
 	utils.RoutesSummary(c.router, c.logger)
@@ -462,7 +460,8 @@ func (c *PlayerClient) initRouterHandlers() {
 func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.TCPAddress) {
 	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminListenAddr)
 
-	g, ctx := errgroup.WithContext(ctx)
+	ctxWithTimeout, _ := context.WithTimeout(ctx, 10*time.Second)
+	g, ctx := errgroup.WithContext(ctxWithTimeout)
 
 	for i, playerName := range playerNames {
 		i := i
@@ -476,10 +475,18 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			listenAddr := playerListenAddrs[i]
 			pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddress())
-			_, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "GET", pingURL, nil)
+
+			requestSender := utils.RequestSender{
+				Client:     c.httpClient,
+				Method:     "GET",
+				URL:        pingURL,
+				BodyReader: nil,
+			}
+
+			_, err := requestSender.Send(ctxWithTimeout)
 			if err != nil {
 				c.logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddress(), err)
-				return errorFailedToConnectToNewPlayer
+				return ErrorFailedToConnectToNewPlayer
 			}
 
 			c.neighborListenAddr[playerName] = listenAddr
@@ -492,7 +499,16 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			}
 
 			playerName := playerName
-			resp, err := utils.MakeHTTPRequestWithTimeout(ctx, c.httpClient, 5*time.Second, "POST", adminURL, utils.MustJSONReader(&ackMsg))
+
+			requestSender = utils.RequestSender{
+				Client:     c.httpClient,
+				Method:     "POST",
+				URL:        adminURL,
+				BodyReader: utils.MustJSONReader(&ackMsg),
+			}
+
+			resp, err := requestSender.Send(ctxWithTimeout)
+
 			if err != nil {
 				c.logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
 			} else {

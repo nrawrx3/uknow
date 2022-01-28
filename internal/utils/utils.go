@@ -88,6 +88,39 @@ func CreateHTTPClient() *http.Client {
 	}
 }
 
+type RequestSender struct {
+	Client     *http.Client
+	Method     string
+	URL        string
+	BodyReader io.Reader
+}
+
+func (sender *RequestSender) SendWithTimeout(parentContext context.Context, timeout time.Duration) (*http.Response, error, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parentContext, timeout)
+
+	req, err := http.NewRequestWithContext(ctx, sender.Method, sender.URL, sender.BodyReader)
+	if err != nil {
+		return nil, err, cancel
+	}
+	resp, err := sender.Client.Do(req)
+	if err != nil {
+		return nil, err, cancel
+	}
+	return resp, nil, cancel
+}
+
+func (sender *RequestSender) Send(parentContext context.Context) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(parentContext, sender.Method, sender.URL, sender.BodyReader)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := sender.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func MakeHTTPRequestWithTimeout(
 	parentContext context.Context,
 	client *http.Client,

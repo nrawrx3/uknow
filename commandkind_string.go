@@ -22,12 +22,13 @@ func _() {
 	_ = x[CmdMoveCards-11]
 	_ = x[CmdSetHand-12]
 	_ = x[CmdApprove-13]
-	_ = x[CmdAddPlayer-14]
+	_ = x[CmdSyncShuffledCards-14]
+	_ = x[CmdAddPlayer-15]
 }
 
-const _CommandKind_name = "CmdNoneCmdAskUserToPlayCmdDeclareReadyCmdDropCardCmdDrawCardCmdDrawCardFromPileCmdChallengeCmdQuitCmdConnectCmdTableInfoCmdAddCardsCmdMoveCardsCmdSetHandCmdApproveCmdAddPlayer"
+const _CommandKind_name = "CmdNoneCmdAskUserToPlayCmdDeclareReadyCmdDropCardCmdDrawCardCmdDrawCardFromPileCmdChallengeCmdQuitCmdConnectCmdTableInfoCmdAddCardsCmdMoveCardsCmdSetHandCmdApproveCmdSyncShuffledCardsCmdAddPlayer"
 
-var _CommandKind_index = [...]uint8{0, 7, 23, 38, 49, 60, 79, 91, 98, 108, 120, 131, 143, 153, 163, 175}
+var _CommandKind_index = [...]uint8{0, 7, 23, 38, 49, 60, 79, 91, 98, 108, 120, 131, 143, 153, 163, 183, 195}
 
 func (i CommandKind) String() string {
 	if i < 0 || i >= CommandKind(len(_CommandKind_index)-1) {

@@ -207,14 +207,18 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 
 		g.Go(func() error {
 			url := playerListenAddr.HTTPAddress() + "/player"
-			req, err := http.NewRequestWithContext(ctx, "POST", url, utils.MustJSONReader(&addPlayerMsg))
-			if err != nil {
-				return err
-			}
 
 			admin.logger.Printf("Telling %s about %s", playerName, newPlayerName)
 
-			_, err = admin.httpClient.Do(req)
+			requestSender := utils.RequestSender{
+				Client:     admin.httpClient,
+				Method:     "POST",
+				URL:        url,
+				BodyReader: utils.MustJSONReader(&addPlayerMsg),
+			}
+
+			_, err := requestSender.Send(ctx)
+
 			if err != nil {
 				return err
 			}
@@ -256,6 +260,10 @@ func (admin *Admin) runExpectingPlayersCheck() {
 }
 
 func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Request) {
+	admin.logger.Println("handleAckNewPlayerAdded called, sleeping for 20 sec...")
+	<-time.After(20 * time.Second)
+	admin.logger.Println("handleAckNewPlayerAdded wakes up")
+
 	var reqBody utils.AckNewPlayerAddedMessage
 	err := json.NewDecoder(r.Body).Decode(&reqBody)
 	if err != nil {
@@ -368,8 +376,9 @@ func (admin *Admin) startGameLoop() {
 		NeedApproval: true,
 	}
 
-	resp, err := utils.MakeHTTPRequestWithTimeout(context.Background(), admin.httpClient, askUserToPlayTimeout, "POST", admin.playerCommandURL(player), utils.MustJSONReader(&commandPayload))
+	_, err := utils.MakeHTTPRequestWithTimeout(context.Background(), admin.httpClient, askUserToPlayTimeout, "POST", admin.playerCommandURL(player), utils.MustJSONReader(&commandPayload))
 	if err != nil {
+		admin.logger.Println(err)
 	}
 }
 
