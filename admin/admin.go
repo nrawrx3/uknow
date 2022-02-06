@@ -48,6 +48,8 @@ type ConfigNewAdmin struct {
 	Table      *uknow.Table
 }
 
+const logFilePrefix = "uknow_admin"
+
 func NewAdmin(config *ConfigNewAdmin) *Admin {
 	admin := &Admin{
 		table:              uknow.NewAdminTable(),
@@ -55,7 +57,7 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 		shuffler:           "",
 		state:              StatusAddingPlayers,
 		expectingAcks:      make([]expectingPlayerAddedAck, 0, 64),
-		logger:             utils.CreateFileLogger(false, "uknow_admin"),
+		logger:             utils.CreateFileLogger(false, logFilePrefix),
 	}
 
 	admin.httpClient = utils.CreateHTTPClient()
@@ -70,7 +72,7 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 
 	admin.httpServer = &http.Server{
 		Handler:           r,
-		Addr:              config.ListenAddr.String(),
+		Addr:              config.ListenAddr.BindString(),
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      5 * time.Second,
 		IdleTimeout:       1 * time.Minute,
@@ -78,6 +80,23 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 	}
 
 	return admin
+}
+
+func (a *Admin) Restart() {
+	a.stateMutex.Lock()
+	defer a.stateMutex.Unlock()
+
+	a.table = uknow.NewAdminTable()
+
+	a.logger = utils.CreateFileLogger(false, logFilePrefix)
+
+	a.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
+	a.shuffler = ""
+	a.state = StatusAddingPlayers
+	a.expectingAcks = make([]expectingPlayerAddedAck, 0)
+	a.newExpectingAckReceived = make(chan expectingPlayerAddedAck)
+
+	log.Print("Admin restarted...")
 }
 
 func (admin *Admin) RunServer() {
@@ -100,7 +119,8 @@ var errorTimeoutAcks = errors.New("some acks timed out")
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
 func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
-	admin.logger.Printf("addNewPlayer...")
+	log.Print("addNewPlayer...")
+	admin.logger.Printf("addNewPlayer receeived from %s", r.URL.Host)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
@@ -137,7 +157,8 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		admin.logger.Fatalf("Cannot add new player: %s", err)
+		admin.logger.Printf("Cannot add new player: %s", err)
+		return
 	}
 
 	admin.listenAddrOfPlayer[newPlayerName] = newPlayerListenAddr
@@ -145,6 +166,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 	// Tell existing players about the new player
 	newPlayerAddr, err := utils.ResolveTCPAddress(newPlayerListenAddr.String())
+	log.Printf("newPlayerAddr.Host: %s", newPlayerAddr.Host)
 	if err != nil {
 		admin.logger.Printf("Invalid newPlayerHostAddr: %s", err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -169,7 +191,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 			utils.WriteErrorPayload(w, err)
 			continue
 		}
-		responseMsg.Add(playerName, addr.Host, addr.Port)
+		responseMsg.Add(playerName, addr.Host, addr.Port, "http")
 	}
 
 	admin.logger.Printf("Telling %s about existing players: %+v", newPlayerName, responseMsg)
@@ -191,7 +213,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerName, newPlayerHost string, newPlayerPort int) {
 	var addPlayerMsg utils.AddNewPlayersMessage
-	addPlayerMsg.Add(newPlayerName, newPlayerHost, newPlayerPort)
+	addPlayerMsg.Add(newPlayerName, newPlayerHost, newPlayerPort, "http")
 
 	ctxForAllRequests, cancelFunc := context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
 	defer cancelFunc()
@@ -416,9 +438,9 @@ const (
 )
 
 type EnvConfig struct {
-	ListenAddr string `envconfig:"ADMIN_LISTEN_ADDR" required:"true"`
-	ListenPort int    `envconfig:"ADMIN_LISTEN_PORT" required:"true"`
-	RunREPL    bool   `envconfig:"ADMIN_RUN_REPL" required:"false" default:"true"`
+	ListenAddr string `split_words:"true" required:"true"`
+	ListenPort int    `split_words:"true" required:"true"`
+	RunREPL    bool   `split_words:"true" required:"false" default:"true"`
 }
 
 func (admin *Admin) RunREPL() {
@@ -436,6 +458,11 @@ func (admin *Admin) RunREPL() {
 
 		if line == "q" || line == "quit" {
 			return
+		}
+
+		if line == "restart" || line == "re" {
+			admin.Restart()
+			continue
 		}
 
 		_, err = uknow.ParseCommandFromInput(strings.TrimSpace(line))
@@ -459,19 +486,23 @@ func (admin *Admin) executeCommand(adminCommand uknow.Command) {
 	}
 }
 
-func RunAPP() {
+func RunApp() {
 	var envConfig EnvConfig
 	var adminConfigFile string
 	flag.StringVar(&adminConfigFile, "conf", ".env", "Dotenv config file for admin server")
 
 	flag.Parse()
 
+	if adminConfigFile == ".env" {
+		log.Print("No config file given, reading from .env")
+	}
+
 	err := godotenv.Load(adminConfigFile)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	err = envconfig.Process("", &envConfig)
+	err = envconfig.Process("ADMIN", &envConfig)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -483,10 +514,11 @@ func RunAPP() {
 
 	admin := NewAdmin(config)
 
-	go admin.RunServer()
-
 	// Admin REPL
 	if envConfig.RunREPL {
-		go admin.RunREPL()
+		go admin.RunServer()
+		admin.RunREPL()
+	} else {
+		admin.RunServer()
 	}
 }

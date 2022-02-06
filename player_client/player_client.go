@@ -84,7 +84,7 @@ type PlayerClient struct {
 	// includes talking asynchronously to the admin and talking to other players.
 	httpClient         *http.Client
 	neighborListenAddr ClusterMap
-	adminListenAddr    string
+	adminAddr          utils.TCPAddress
 
 	// Exposes the player API to the game admin.
 	router *mux.Router
@@ -92,7 +92,7 @@ type PlayerClient struct {
 	askUIForUserTurnChan       chan<- askUIForUserTurnArgs
 	defaultCommandReceiverChan <-chan uknow.Command
 	logWindowChan              chan<- string
-	logger                     *log.Logger
+	Logger                     *log.Logger
 
 	debugFlags DebugFlags
 }
@@ -104,7 +104,8 @@ type ConfigNewPlayerClient struct {
 	TestErrorChan              chan<- error
 	Table                      *uknow.Table
 	// HttpListenAddr             string
-	ListenAddr utils.TCPAddress
+	ListenAddr       utils.TCPAddress
+	DefaultAdminAddr utils.TCPAddress
 }
 
 func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
@@ -117,8 +118,9 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 		askUIForUserTurnChan:       config.AskUIForUserTurnChan,
 		defaultCommandReceiverChan: config.DefaultCommandReceiverChan,
 		logWindowChan:              config.LogWindowChan,
-		logger:                     utils.CreateFileLogger(false, config.Table.LocalPlayerName),
+		Logger:                     utils.CreateFileLogger(false, config.Table.LocalPlayerName),
 		debugFlags:                 debugFlags,
+		adminAddr:                  config.DefaultAdminAddr,
 	}
 
 	c.router = mux.NewRouter()
@@ -126,15 +128,18 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 	c.initRouterHandlers()
 
 	c.httpServer = &http.Server{
-		Addr:    config.ListenAddr.String(),
+		Addr:    config.ListenAddr.BindString(),
 		Handler: c.router,
 	}
+
+	c.Logger.Printf("Addr bind string = %s", config.ListenAddr.BindString())
+	c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
 
 	return c
 }
 
 func (c *PlayerClient) RunServer() {
-	c.logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
+	c.Logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
 	err := c.httpServer.ListenAndServe()
 	if err != nil {
 		log.Fatalf("PlayerClient.RunServer() failed: %s", err.Error())
@@ -219,17 +224,17 @@ func (c *PlayerClient) handleAdminCommand(ctx context.Context, senderName string
 
 // Meant to be running in its goroutine. Handles non-play or inspect related commands.
 func (c *PlayerClient) RunDefaultCommandHandler() {
-	c.logger.Printf("%s - running default command handler", c.table.LocalPlayerName)
+	c.Logger.Printf("%s - running default command handler", c.table.LocalPlayerName)
 
 	ctx := context.Background()
 
 	for cmd := range c.defaultCommandReceiverChan {
 		// Logging for now
-		c.logger.Printf("default cmd `%+v`", cmd)
+		c.Logger.Printf("default cmd `%+v`", cmd)
 
 		switch cmd.Kind {
 		case uknow.CmdQuit:
-			c.logger.Printf("Shutdown server")
+			c.Logger.Printf("Shutdown server")
 			c.httpServer.Shutdown(context.Background())
 
 			uiStopChan := make(chan uknow.Command)
@@ -239,71 +244,82 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 				sender:      uknow.ReservedNameClient,
 			}
 
-			c.logger.Printf("Shutdown UI")
+			c.Logger.Printf("Shutdown UI")
 			c.askUIForUserTurnChan <- askUIargs
 			<-uiStopChan
 			break
 
 		case uknow.CmdConnect:
-			c.logger.Printf("Received a connect command...")
-			adminAddr := cmd.ExtraData.(string)
+			c.Logger.Printf("Received a connect command...")
+
+			var adminAddr utils.TCPAddress
+			var err error
+
+			if adminAddrString, ok := cmd.ExtraData.(string); ok {
+				adminAddr, err = utils.ResolveTCPAddress(adminAddrString)
+				if err != nil {
+					c.Logger.Print(err)
+					c.logWindowChan <- fmt.Sprint(err)
+				}
+			} else {
+				adminAddr = c.adminAddr
+			}
 
 			var msg utils.AddNewPlayersMessage
 
 			listenAddr, err := utils.ResolveTCPAddress(c.httpServer.Addr)
 			if err != nil {
-				c.logger.Fatal(err)
+				c.Logger.Fatal(err)
 			}
 
-			msg.Add(c.table.LocalPlayerName, listenAddr.Host, listenAddr.Port)
+			c.Logger.Printf("Sending listenAddr %+v to admin", listenAddr)
+
+			msg.Add(c.table.LocalPlayerName, listenAddr.Host, listenAddr.Port, "http")
 
 			c.stateMutex.Lock()
 			c.connectToAdmin(ctx, msg, adminAddr)
 			c.stateMutex.Unlock()
 
 		default:
-			c.logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
+			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
 		}
 	}
 
 	log.Print("Exit RunDefaultCommandHandler...")
 }
 
-func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlayersMessage, adminAddr string) {
+func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlayersMessage, adminAddr utils.TCPAddress) {
 	var body bytes.Buffer
 	err := json.NewEncoder(&body).Encode(msg)
 	if err != nil {
-		c.logger.Fatal(err)
+		c.Logger.Fatal(err)
 	}
 
-	log.Printf("connectToAdmin: adminAddr = %s", adminAddr)
-
 	// TODO: use ctx along with httpClient.Do
-	url := fmt.Sprintf("%s/player", adminAddr)
+	url := fmt.Sprintf("%s/player", adminAddr.String())
 	resp, err := c.httpClient.Post(url, "application/json", &body)
 	if err != nil {
-		c.logger.Printf("connectToAdmin error: %s", err.Error())
+		c.Logger.Printf("connectToAdmin error: %s", err.Error())
 		return
 	}
 
 	switch resp.StatusCode {
 	case http.StatusSeeOther:
-		c.logger.Printf("connectToAdmin: Local player is already present in admin's table")
+		c.Logger.Printf("connectToAdmin: Local player is already present in admin's table")
 	case http.StatusOK:
 		var respMsg utils.AddNewPlayersMessage
 		err := json.NewDecoder(resp.Body).Decode(&respMsg)
 		if err != nil {
-			c.logger.Fatalf("connectToAdmin: Failed to read OK response message. %s", err)
+			c.Logger.Fatalf("connectToAdmin: Failed to read OK response message. %s", err)
 		} else {
-			c.logger.Printf("Done connecting to admin")
-			// TODO: Handle respMsg - connect to each player in the cluster
-			c.adminListenAddr = adminAddr
-			c.logger.Printf("Will connect to currently existing players: %+v", respMsg)
+			c.Logger.Printf("Done connecting to admin")
+			c.adminAddr = adminAddr
+			c.Logger.Printf("Will connect to currently existing players: %+v", respMsg)
 
 			go c.connectToEachPlayer(ctx, respMsg.PlayerNames, respMsg.ClientListenAddrs)
 		}
 	default:
-		c.logger.Fatalf("connectToAdmin: Unexpected response: %s", resp.Status)
+		c.Logger.Fatalf("connectToAdmin: Unexpected response: %s", resp.Status)
 	}
 }
 
@@ -320,7 +336,7 @@ DrawDeck count: %+v,
 DiscardPile count: %+v`,
 		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
 	uiState.appendEventLog(msg)
-	c.logger.Printf(msg)
+	c.Logger.Printf(msg)
 	c.logWindowChan <- msg
 }
 
@@ -343,7 +359,7 @@ func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
 	format = "Client: " + format
 	message := fmt.Sprintf(format, args...)
 	c.logWindowChan <- message
-	c.logger.Print(message)
+	c.Logger.Print(message)
 }
 
 func (c *PlayerClient) initRouterHandlers() {
@@ -354,7 +370,7 @@ func (c *PlayerClient) initRouterHandlers() {
 		if err != nil {
 			io.WriteString(w, err.Error())
 			w.WriteHeader(http.StatusBadRequest)
-			c.logger.Printf("/command: Bad request from sender '%s', error: %s", payload.SenderName, err.Error())
+			c.Logger.Printf("/command: Bad request from sender '%s', error: %s", payload.SenderName, err.Error())
 			return
 		}
 
@@ -383,7 +399,7 @@ func (c *PlayerClient) initRouterHandlers() {
 
 			result, err := c.handleAdminCommand(requestCtx, payload.SenderName, payload.Command)
 			if err != nil {
-				c.logger.Printf("%s", err.Error())
+				c.Logger.Printf("%s", err.Error())
 
 				errorPayload := utils.UnwrappedErrorPayload{}
 				errorPayload.Add(err)
@@ -405,7 +421,7 @@ func (c *PlayerClient) initRouterHandlers() {
 		json.NewEncoder(w).Encode(&errorPayload)
 
 		// Handle non-admin player command
-		c.logger.Printf("Not responding to senderName `%s`", payload.SenderName)
+		c.Logger.Printf("Not responding to senderName `%s`", payload.SenderName)
 	})
 
 	c.router.Path("/players").Methods("POST").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +448,7 @@ func (c *PlayerClient) initRouterHandlers() {
 	})
 
 	c.router.Path("/players").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c.logger.Printf("Received GET /players")
+		c.Logger.Printf("Received GET /players")
 		c.stateMutex.Lock()
 		defer c.stateMutex.Unlock()
 
@@ -441,24 +457,24 @@ func (c *PlayerClient) initRouterHandlers() {
 		}
 
 		if err := json.NewEncoder(w).Encode(&msg); err != nil {
-			c.logger.Printf("GET /players error: %s", err)
+			c.Logger.Printf("GET /players error: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		c.logger.Printf("Received GET /players. Sending: %+v", msg)
+		c.Logger.Printf("Received GET /players. Sending: %+v", msg)
 	})
 
 	c.router.Path("/ping").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "pong")
 	})
 
-	utils.RoutesSummary(c.router, c.logger)
+	utils.RoutesSummary(c.router, c.Logger)
 }
 
 // Connects to each player as given in playerNames and playerListenAddrs
 func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.TCPAddress) {
-	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminListenAddr)
+	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.String())
 
 	ctxWithTimeout, _ := context.WithTimeout(ctx, 10*time.Second)
 	g, ctx := errgroup.WithContext(ctxWithTimeout)
@@ -485,13 +501,13 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			_, err := requestSender.Send(ctxWithTimeout)
 			if err != nil {
-				c.logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddress(), err)
+				c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddress(), err)
 				return ErrorFailedToConnectToNewPlayer
 			}
 
 			c.neighborListenAddr[playerName] = listenAddr
 
-			c.logger.Printf("Successfully connected to %s, will send ack to admin", playerName)
+			c.Logger.Printf("Successfully connected to %s, will send ack to admin", playerName)
 
 			ackMsg := utils.AckNewPlayerAddedMessage{
 				ConnectingPlayer: c.table.LocalPlayerName,
@@ -510,9 +526,9 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			resp, err := requestSender.Send(ctxWithTimeout)
 
 			if err != nil {
-				c.logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
+				c.Logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
 			} else {
-				c.logger.Printf("Ack successful: %s", resp.Status)
+				c.Logger.Printf("Ack successful: %s", resp.Status)
 			}
 			return err
 		})
@@ -521,6 +537,6 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 	err := g.Wait()
 
 	if err != nil {
-		c.logger.Printf("One or more ack messages failed. Error: %s", err)
+		c.Logger.Printf("One or more ack messages failed. Error: %s", err)
 	}
 }

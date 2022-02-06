@@ -13,8 +13,9 @@ import (
 )
 
 type TCPAddress struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 func trimProtocolPrefix(addr string) string {
@@ -36,6 +37,14 @@ func (t *TCPAddress) HTTPAddress() string {
 }
 
 func (t *TCPAddress) String() string {
+	protocol := "http"
+	if t.Protocol != "" {
+		protocol = t.Protocol
+	}
+	return fmt.Sprintf("%s://%s:%d", protocol, t.Host, t.Port)
+}
+
+func (t *TCPAddress) BindString() string {
 	return fmt.Sprintf("%s:%d", t.Host, t.Port)
 }
 
@@ -62,16 +71,28 @@ func ConcatHostPort(protocol string, host string, port int) string {
 }
 
 func ResolveTCPAddress(addr string) (TCPAddress, error) {
-	addr = strings.TrimPrefix(addr, "http://")
-	addr = strings.TrimPrefix(addr, "https://")
+	var protocol string
+
+	if strings.HasPrefix(addr, "http://") {
+		protocol = "http"
+	} else if strings.HasPrefix(addr, "https://") {
+		protocol = "https"
+	} else if strings.HasPrefix(addr, "tcp://") {
+		protocol = "tcp"
+	} else {
+		protocol = ""
+	}
+
+	addr = trimProtocolPrefix(addr)
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		return TCPAddress{}, err
 	}
 	return TCPAddress{
-		Host: tcpAddr.IP.String(),
-		Port: tcpAddr.Port,
+		Host:     tcpAddr.IP.String(),
+		Port:     tcpAddr.Port,
+		Protocol: protocol,
 	}, nil
 }
 

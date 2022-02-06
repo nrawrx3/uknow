@@ -36,7 +36,7 @@ type AddNewPlayersMessage struct {
 	ClientListenAddrs []TCPAddress `json:"client_listen_addrs"`
 }
 
-func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clientPort int) *AddNewPlayersMessage {
+func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clientPort int, protocol string) *AddNewPlayersMessage {
 	if msg.PlayerNames == nil {
 		msg.PlayerNames = make([]string, 0, 4)
 	}
@@ -46,7 +46,7 @@ func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clien
 	}
 
 	msg.PlayerNames = append(msg.PlayerNames, playerName)
-	msg.ClientListenAddrs = append(msg.ClientListenAddrs, TCPAddress{clientHost, clientPort})
+	msg.ClientListenAddrs = append(msg.ClientListenAddrs, TCPAddress{clientHost, clientPort, protocol})
 	return msg
 }
 

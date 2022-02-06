@@ -14,16 +14,24 @@ import (
 
 var configFile string
 var envConfig client.EnvConfig
+var configPrefix string
 
 func RunApp() {
 	flag.StringVar(&configFile, "conf", ".env", "config file")
+	flag.StringVar(&configPrefix, "conf-prefix", "", "config key prefix")
 	flag.Parse()
+
+	if configPrefix == "" {
+		log.Print("Value --config-prefix not specified")
+	}
+
+	log.Printf("Loading configs from file %s", configFile)
 
 	if err := godotenv.Load(configFile); err != nil {
 		log.Fatal(err.Error())
 	}
 
-	err := envconfig.Process("", &envConfig)
+	err := envconfig.Process(configPrefix, &envConfig)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -47,6 +55,15 @@ func RunApp() {
 		DefaultCommandReceiverChan: commChannels.DefaultCommandReceiveChan,
 		LogWindowChan:              commChannels.LogWindowChan,
 		Table:                      table,
+		ListenAddr: utils.TCPAddress{
+			Host:     envConfig.CommandListenHost,
+			Port:     envConfig.CommandListenPort,
+			Protocol: "http",
+		},
+	}
+
+	if envConfig.AdminHost != "" && envConfig.AdminPort != 0 {
+		playerClientConfig.DefaultAdminAddr = utils.TCPAddress{Host: envConfig.AdminHost, Port: envConfig.AdminPort}
 	}
 
 	c := client.NewPlayerClient(playerClientConfig, debugFlags)
@@ -58,9 +75,8 @@ func RunApp() {
 	uiState.Init(debugFlags, commChannels.AskUIForUserTurnChan, commChannels.LogWindowChan)
 	defer ui.Close()
 
-	uknow.Logger = utils.CreateFileLogger(true, envConfig.PlayerName)
+	uknow.Logger = c.Logger
 
-	// uknow.Logger = log.New(&PlayerClientLogger{c: &c}, localPlayerName, log.Lshortfile|log.Ltime)
 	go uiState.RunPollInputEvents(commChannels.DefaultCommandReceiveChan)
 	uiState.RunDrawLoop()
 }

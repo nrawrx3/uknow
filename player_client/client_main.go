@@ -6,12 +6,14 @@ import (
 )
 
 type EnvConfig struct {
-	CommandListenHost string   `split_words:"true" default:"localhost"`
-	CommandListenPort int      `required:"true" split_words:"true"`
-	AdminHost         string   `split_words:"true" default:"localhost"`
-	AdminPort         int      `split_words:"true" required:"true"`
-	PlayerName        string   `split_words:"true" required:"true"`
-	DebugFlags        []string `split_words:"true"`
+	CommandListenHost string `split_words:"true" default:"localhost"`
+	CommandListenPort int    `split_words:"true" required:"true" split_words:"true"`
+
+	// The default admin address to connect to using `connect_default` command.
+	AdminHost  string   `split_words:"true" default:"localhost"`
+	AdminPort  int      `split_words:"true" required:"true"`
+	PlayerName string   `split_words:"true" required:"true"`
+	DebugFlags []string `split_words:"true"`
 }
 
 type DebugFlags struct {

@@ -182,6 +182,11 @@ func parseCommand(s *scanner.Scanner, tok rune) (rune, Command, error) {
 		command.TargetPlayerName = s.TokenText()
 		return s.Scan(), command, nil
 
+	case "connect_default":
+		command.Kind = CmdConnect
+		command.ExtraData = nil
+		return s.Scan(), command, nil
+
 	case "table_info":
 		command.Kind = CmdTableInfo
 		return s.Scan(), command, nil
