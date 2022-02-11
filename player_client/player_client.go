@@ -477,13 +477,15 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.String())
 
 	ctxWithTimeout, _ := context.WithTimeout(ctx, 10*time.Second)
-	g, ctx := errgroup.WithContext(ctxWithTimeout)
+	g, _ := errgroup.WithContext(ctxWithTimeout)
 
 	for i, playerName := range playerNames {
 		i := i
 		playerName := playerName
 
 		g.Go(func() error {
+			c.Logger.Printf("connectToEachPlayer: Local player %s connecting to %s", c.table.LocalPlayerName, playerName)
+
 			_, exists := c.neighborListenAddr[playerName]
 			if exists || playerName == c.table.LocalPlayerName {
 				return nil
@@ -507,14 +509,12 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			c.neighborListenAddr[playerName] = listenAddr
 
-			c.Logger.Printf("Successfully connected to %s, will send ack to admin", playerName)
+			c.Logger.Printf("Local player %s Successfully connected to %s, will send ack to admin", c.table.LocalPlayerName, playerName)
 
 			ackMsg := utils.AckNewPlayerAddedMessage{
-				ConnectingPlayer: c.table.LocalPlayerName,
-				ConnectedPlayer:  playerName,
+				AckerPlayer: c.table.LocalPlayerName,
+				NewPlayer:   playerName,
 			}
-
-			playerName := playerName
 
 			requestSender = utils.RequestSender{
 				Client:     c.httpClient,
@@ -525,8 +525,8 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			resp, err := requestSender.Send(ctxWithTimeout)
 
-			if err != nil {
-				c.Logger.Printf("Failed to send player_added_ack message for player %s to admin: %s", playerName, err)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				c.Logger.Printf("Failed to send player_added_ack message for player %s to admin: %s, status: %s", playerName, err, resp.Status)
 			} else {
 				c.Logger.Printf("Ack successful: %s", resp.Status)
 			}

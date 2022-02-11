@@ -168,8 +168,6 @@ func (d Deck) RemoveCard(index int) Deck {
 	return append(d[0:index], d[index+1:]...)
 }
 
-type State int
-
 type Table struct {
 	DrawDeck         Deck            `json:"draw_deck"`
 	Pile             Deck            `json:"pile"`

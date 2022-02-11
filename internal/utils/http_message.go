@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"time"
 
 	"github.com/rksht/uknow"
 )
@@ -55,8 +56,14 @@ type GetPlayersMessage struct {
 }
 
 type AckNewPlayerAddedMessage struct {
-	ConnectingPlayer string `json:"connecting_player"`
-	ConnectedPlayer  string `json:"connected_player"`
+	AckerPlayer string `json:"acker_player"`
+	NewPlayer   string `json:"new_player"`
+}
+
+type SetReadyMessage struct {
+	ShufflerName          string        `json:"shuffler_name"`
+	ShufflerIsFirstPlayer bool          `json:"shuffler_is_first_player"`
+	Timeout               time.Duration `json:"timeout"`
 }
 
 type UnwrappedErrorPayload struct {
