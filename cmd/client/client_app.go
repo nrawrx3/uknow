@@ -2,14 +2,15 @@ package main
 
 import (
 	"flag"
+	"log"
+	"strings"
+
 	ui "github.com/gizak/termui/v3"
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
 	"github.com/rksht/uknow/internal/utils"
 	client "github.com/rksht/uknow/player_client"
-	"log"
-	"strings"
 )
 
 var configFile string
@@ -51,6 +52,7 @@ func RunApp() {
 	table := uknow.NewTable(envConfig.PlayerName)
 
 	playerClientConfig := &client.ConfigNewPlayerClient{
+		GeneralUICommandChan:       commChannels.GeneralUICommandChan,
 		AskUIForUserTurnChan:       commChannels.AskUIForUserTurnChan,
 		DefaultCommandReceiverChan: commChannels.DefaultCommandReceiveChan,
 		LogWindowChan:              commChannels.LogWindowChan,
@@ -71,14 +73,18 @@ func RunApp() {
 	go c.RunServer()
 	go c.RunDefaultCommandHandler()
 
-	var uiState client.UIState
-	uiState.Init(debugFlags, commChannels.AskUIForUserTurnChan, commChannels.LogWindowChan)
+	var clientUI client.ClientUI
+	clientUI.Init(debugFlags,
+		commChannels.GeneralUICommandChan,
+		commChannels.AskUIForUserTurnChan,
+		commChannels.LogWindowChan)
 	defer ui.Close()
 
 	uknow.Logger = c.Logger
 
-	go uiState.RunPollInputEvents(commChannels.DefaultCommandReceiveChan)
-	uiState.RunDrawLoop()
+	go clientUI.RunPollInputEvents(commChannels.DefaultCommandReceiveChan)
+	go clientUI.RunGeneralUICommandConsumer()
+	clientUI.RunDrawLoop()
 }
 
 func main() {

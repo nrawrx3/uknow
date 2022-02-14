@@ -9,6 +9,7 @@ import (
 	"text/scanner"
 )
 
+// `CommandKind` represents a client command. Both UI and Admin can send these commands to the PlayerClient to do an action.
 //go:generate stringer -type=CommandKind
 type CommandKind int
 

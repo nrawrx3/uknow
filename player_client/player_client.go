@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"github.com/rksht/uknow"
+	messages "github.com/rksht/uknow/internal/messages"
 	utils "github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
@@ -28,6 +28,15 @@ func maxInt(a, b int) int {
 type ClusterMap map[string]utils.TCPAddress // Map of player name to their public address
 
 const userDecisionTimeout = time.Duration(10) * time.Second
+
+type PlayerClientState string
+
+const (
+	WaitingToConnectToAdmin       PlayerClientState = "waiting_to_connect_to_admin"
+	WaitingForAdminToServeCards   PlayerClientState = "waiting_for_admin_to_serve_cards"
+	WaitingForAdminToChoosePlayer PlayerClientState = "waiting_for_admin_to_choose_player"
+	AskingUserForDecisionCommand  PlayerClientState = "asking_user_for_decision_command"
+)
 
 // func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
 // 	if excludePlayers == nil {
@@ -50,38 +59,35 @@ const userDecisionTimeout = time.Duration(10) * time.Second
 // 	return cloned
 // }
 
-type askUIForUserTurnArgs struct {
-	receive               chan<- uknow.Command
-	timeout               time.Duration
-	sender                string
-	appQuitting           bool // Set by client to let UI know that the app is stopping
-	expectingUserDecision bool // Set by client to make UI expect a user decision command
-}
-
-type ClientState string
-
-const (
-	clientStateFreeToRespond         ClientState = "free_to_respond"
-	clientStateAwaitingAdminApproval             = "awaiting_admin_approval"
-)
+// type askUIForUserTurnArgs struct {
+// 	// The PlayerClient itself will wait on this channel to receive the command input from user
+// 	receive               chan<- uknow.Command
+// 	timeout               time.Duration
+// 	sender                string
+// 	appQuitting           bool // Set by client to let UI know that the app is stopping
+// 	expectingUserDecision bool // Set by client to make UI expect a user decision command
+// }
 
 var ErrorClientAwaitingApproval = errors.New("Client awaiting approval of previous command")
 var ErrorClientUnexpectedSender = errors.New("Unexpected sender")
 var ErrorFailedToConnectToNewPlayer = errors.New("Failed to connect to new player")
+var ErrorUIFailedToConsumeCommand = errors.New("UI Failed to consume command")
+var ErrorUnknownEvent = errors.New("Unknown event")
 
 type PlayerClient struct {
 	// Used to protect the non-gui state
-	stateMutex             sync.Mutex
-	table                  *uknow.Table
-	allowModifyingCommands bool
-	clientState            ClientState
-	cmdAwaitingApproval    uknow.Command
+	stateMutex  sync.Mutex
+	clientState PlayerClientState
+
+	table               *uknow.Table
+	cmdAwaitingApproval uknow.Command
 
 	// Server used to service requests made by admin and other players
 	httpServer *http.Server
 
-	// Client used to make HTTP requests that are initiated by the user independently of the admin. This
-	// includes talking asynchronously to the admin and talking to other players.
+	// NOTE(@rk): We are NOT storing connections to any of the other players in a PlayerClient. We let http.Transport do that for us. We simply keep a map of player name to player address.
+	// When the admin sends an AddNewPlayer message via POST /players to a PlayerClient, the client makes a GET /ping on the new player's address to confirm that it can connect. This also
+	// creates a connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
 	neighborListenAddr ClusterMap
 	adminAddr          utils.TCPAddress
@@ -89,7 +95,8 @@ type PlayerClient struct {
 	// Exposes the player API to the game admin.
 	router *mux.Router
 
-	askUIForUserTurnChan       chan<- askUIForUserTurnArgs
+	generalUICommandChan       chan<- UICommand
+	askForUserInputChan        chan<- *UICommandAskForUserInput
 	defaultCommandReceiverChan <-chan uknow.Command
 	logWindowChan              chan<- string
 	Logger                     *log.Logger
@@ -98,7 +105,8 @@ type PlayerClient struct {
 }
 
 type ConfigNewPlayerClient struct {
-	AskUIForUserTurnChan       chan<- askUIForUserTurnArgs
+	GeneralUICommandChan       chan<- UICommand
+	AskUIForUserTurnChan       chan<- *UICommandAskForUserInput
 	DefaultCommandReceiverChan <-chan uknow.Command
 	LogWindowChan              chan<- string
 	TestErrorChan              chan<- error
@@ -111,11 +119,12 @@ type ConfigNewPlayerClient struct {
 func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
 	c := &PlayerClient{
 		table:                      config.Table,
-		clientState:                clientStateFreeToRespond,
+		clientState:                WaitingToConnectToAdmin,
 		cmdAwaitingApproval:        uknow.NewCommand(uknow.CmdNone),
 		httpClient:                 utils.CreateHTTPClient(),
 		neighborListenAddr:         make(ClusterMap),
-		askUIForUserTurnChan:       config.AskUIForUserTurnChan,
+		generalUICommandChan:       config.GeneralUICommandChan,
+		askForUserInputChan:        config.AskUIForUserTurnChan,
 		defaultCommandReceiverChan: config.DefaultCommandReceiverChan,
 		logWindowChan:              config.LogWindowChan,
 		Logger:                     utils.CreateFileLogger(false, config.Table.LocalPlayerName),
@@ -146,82 +155,6 @@ func (c *PlayerClient) RunServer() {
 	}
 }
 
-var userDecisionCommands = map[uknow.CommandKind]struct{}{
-	uknow.CmdDrawCard:         {},
-	uknow.CmdDropCard:         {},
-	uknow.CmdDrawCardFromPile: {},
-}
-
-type handleAdminCommandResult struct {
-	inputCommand        uknow.Command
-	adminNeedsToApprove bool // TODO: Get rid of this. Server explicitly sends NeedApproval field
-}
-
-// **Does not lock the stateMutex**
-func (c *PlayerClient) handleAdminCommand(ctx context.Context, senderName string, cmd uknow.Command) (handleAdminCommandResult, error) {
-	var res handleAdminCommandResult
-
-	if c.cmdAwaitingApproval.Kind != uknow.CmdNone {
-		return res, ErrorClientAwaitingApproval
-	}
-
-	switch cmd.Kind {
-	case uknow.CmdAddCards:
-		hand, ok := c.table.HandOfPlayer[cmd.TargetPlayerName]
-		if !ok {
-			return res, errors.New("No player exists in local with name " + cmd.TargetPlayerName)
-		}
-		for i := 0; i < cmd.Count; i++ {
-			card, err := c.table.DrawDeck.Top()
-			if err != nil {
-				return res, err
-			}
-			hand = hand.Push(card)
-		}
-		c.table.HandOfPlayer[cmd.TargetPlayerName] = hand
-		return res, nil
-
-	case uknow.CmdMoveCards:
-		// TODO: process
-		return res, nil
-
-	case uknow.CmdAskUserToPlay:
-		// Do something here to tell user that it's their turn
-		// c.notifyRedrawUI(..)
-		c.allowModifyingCommands = true
-
-		receiveChan := make(chan uknow.Command)
-
-		askUIargs := askUIForUserTurnArgs{
-			receive:               receiveChan,
-			sender:                uknow.ReservedNameAdmin,
-			timeout:               userDecisionTimeout,
-			expectingUserDecision: true,
-		}
-
-		// Ask UI to receive a decision command from user, with a timeout
-		select {
-		case c.askUIForUserTurnChan <- askUIargs:
-			select {
-			case inputCommand := <-receiveChan:
-				res.inputCommand = inputCommand
-				res.adminNeedsToApprove = true
-
-			case <-ctx.Done():
-				return res, errors.New("User did not respond in time")
-			}
-
-		case <-ctx.Done():
-			return res, ctx.Err()
-		}
-
-	default:
-		return res, fmt.Errorf("Unimplemented command: %s", cmd.Kind)
-	}
-
-	panic("Unreachable")
-}
-
 // Meant to be running in its goroutine. Handles non-play or inspect related commands.
 func (c *PlayerClient) RunDefaultCommandHandler() {
 	c.Logger.Printf("%s - running default command handler", c.table.LocalPlayerName)
@@ -238,20 +171,20 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 			c.httpServer.Shutdown(context.Background())
 
 			uiStopChan := make(chan uknow.Command)
-			askUIargs := askUIForUserTurnArgs{
+			askUIargs := &UICommandAskForUserInput{
 				receive:     uiStopChan,
 				appQuitting: true,
 				sender:      uknow.ReservedNameClient,
 			}
 
 			c.Logger.Printf("Shutdown UI")
-			c.askUIForUserTurnChan <- askUIargs
+			c.askForUserInputChan <- askUIargs
 			<-uiStopChan
-			break
 
 		case uknow.CmdConnect:
-			c.Logger.Printf("Received a connect command...")
+			c.Logger.Printf("Received a connect command from UI...")
 
+			// Building the message struct first since it doesn't depend on mutable state
 			var adminAddr utils.TCPAddress
 			var err error
 
@@ -265,20 +198,46 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 				adminAddr = c.adminAddr
 			}
 
-			var msg utils.AddNewPlayersMessage
+			var msg messages.AddNewPlayersMessage
 
 			listenAddr, err := utils.ResolveTCPAddress(c.httpServer.Addr)
 			if err != nil {
 				c.Logger.Fatal(err)
 			}
 
-			c.Logger.Printf("Sending listenAddr %+v to admin", listenAddr)
-
 			msg.Add(c.table.LocalPlayerName, listenAddr.Host, listenAddr.Port, "http")
 
+			// Lock and check if we have the correct state. Connect to admin if yes.
 			c.stateMutex.Lock()
+			if c.clientState != WaitingToConnectToAdmin {
+				c.logWindowChan <- fmt.Sprintf("Invalid command for current state: %s", c.clientState)
+				c.stateMutex.Unlock()
+				continue
+			}
+			c.Logger.Printf("Will sending listenAddr %+v to admin", listenAddr)
 			c.connectToAdmin(ctx, msg, adminAddr)
 			c.stateMutex.Unlock()
+
+		case uknow.CmdDeclareReady:
+			c.Logger.Printf("Received a declare ready command from UI...")
+
+			url := fmt.Sprintf("%s/set_ready", c.adminAddr.String())
+
+			setReadyMessage := messages.SetReadyMessage{
+				ShufflerName:          c.table.LocalPlayerName,
+				ShufflerIsFirstPlayer: true,
+			}
+
+			resp, err := c.httpClient.Post(url, "application/json", messages.MustJSONReader(&setReadyMessage))
+
+			if err != nil {
+				c.Logger.Print(err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				c.logWindowChan <- "Failed to send declare ready message"
+				c.Logger.Printf("Failed to send declare ready message, resp status code: %s", resp.Status)
+			}
 
 		default:
 			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
@@ -288,7 +247,8 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 	log.Print("Exit RunDefaultCommandHandler...")
 }
 
-func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlayersMessage, adminAddr utils.TCPAddress) {
+// DOES NOT LOCK stateMutex. Connects to admin and updates state on success.
+func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPlayersMessage, adminAddr utils.TCPAddress) {
 	var body bytes.Buffer
 	err := json.NewEncoder(&body).Encode(msg)
 	if err != nil {
@@ -307,7 +267,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlaye
 	case http.StatusSeeOther:
 		c.Logger.Printf("connectToAdmin: Local player is already present in admin's table")
 	case http.StatusOK:
-		var respMsg utils.AddNewPlayersMessage
+		var respMsg messages.AddNewPlayersMessage
 		err := json.NewDecoder(resp.Body).Decode(&respMsg)
 		if err != nil {
 			c.Logger.Fatalf("connectToAdmin: Failed to read OK response message. %s", err)
@@ -316,6 +276,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlaye
 			c.adminAddr = adminAddr
 			c.Logger.Printf("Will connect to currently existing players: %+v", respMsg)
 
+			c.clientState = WaitingForAdminToServeCards
 			go c.connectToEachPlayer(ctx, respMsg.PlayerNames, respMsg.ClientListenAddrs)
 		}
 	default:
@@ -323,7 +284,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg utils.AddNewPlaye
 	}
 }
 
-func (c *PlayerClient) printTableInfo(uiState *UIState) {
+func (c *PlayerClient) printTableInfo(uiState *ClientUI) {
 	handCounts := make(map[string]int)
 	for playerName, hand := range c.table.HandOfPlayer {
 		handCounts[playerName] = len(hand)
@@ -340,21 +301,6 @@ DiscardPile count: %+v`,
 	c.logWindowChan <- msg
 }
 
-func (c *PlayerClient) addNewPlayer(playerName string, uiState *UIState) {
-	c.stateMutex.Lock()
-	defer c.stateMutex.Unlock()
-
-	c.table.AddPlayer(playerName)
-
-	go func() {
-		c.stateMutex.Lock()
-		defer c.stateMutex.Unlock()
-		uiState.notifyRedrawUI(uiRedraw, func() {
-			uiState.refillHandcountChart(c.table)
-		})
-	}()
-}
-
 func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
 	format = "Client: " + format
 	message := fmt.Sprintf(format, args...)
@@ -363,116 +309,111 @@ func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
 }
 
 func (c *PlayerClient) initRouterHandlers() {
-	// All admin commands are serviced via this route. We stay away from REST since it
-	// doesn't add much to understandability
-	c.router.Path("/command").Methods("POST").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		payload, err := utils.DecodeCommandPayload(r.Body)
-		if err != nil {
-			io.WriteString(w, err.Error())
-			w.WriteHeader(http.StatusBadRequest)
-			c.Logger.Printf("/command: Bad request from sender '%s', error: %s", payload.SenderName, err.Error())
-			return
-		}
-
-		ourDeadline := time.Now().Add(userDecisionTimeout)
-		requestCtx := r.Context()
-		requestDeadline, hasDeadline := requestCtx.Deadline()
-
-		var cancelHandle func()
-		if !hasDeadline || requestDeadline.After(ourDeadline) {
-			requestCtx, cancelHandle = context.WithDeadline(requestCtx, ourDeadline)
-			defer cancelHandle()
-		}
-
-		if payload.SenderName == uknow.ReservedNameAdmin {
-			c.stateMutex.Lock()
-			defer c.stateMutex.Unlock()
-
-			if c.clientState == clientStateAwaitingAdminApproval {
-				if payload.Command.Kind == uknow.CmdApprove && uknow.CmdApprovesCommand(payload.Command, c.cmdAwaitingApproval) {
-					c.clientState = clientStateFreeToRespond
-					c.cmdAwaitingApproval = uknow.NewCommand(uknow.CmdNone)
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-			}
-
-			result, err := c.handleAdminCommand(requestCtx, payload.SenderName, payload.Command)
-			if err != nil {
-				c.Logger.Printf("%s", err.Error())
-
-				errorPayload := utils.UnwrappedErrorPayload{}
-				errorPayload.Add(err)
-				json.NewEncoder(w).Encode(&errorPayload)
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-
-			if payload.NeedApproval {
-				// Call the admin and expect an ok status
-				c.clientState = clientStateAwaitingAdminApproval
-				c.cmdAwaitingApproval = result.inputCommand
-			}
-		}
-
-		w.WriteHeader(http.StatusForbidden)
-		errorPayload := utils.UnwrappedErrorPayload{}
-		errorPayload.Add(ErrorClientUnexpectedSender)
-		json.NewEncoder(w).Encode(&errorPayload)
-
-		// Handle non-admin player command
-		c.Logger.Printf("Not responding to senderName `%s`", payload.SenderName)
-	})
-
-	c.router.Path("/players").Methods("POST").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var msg utils.AddNewPlayersMessage
-
-		err := json.NewDecoder(r.Body).Decode(&msg)
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-
-		// Set up the connection to the new player without blocking the http response to this call,
-		// otherwise we're going to have a deadlock with the other client.
-		go func() {
-			c.stateMutex.Lock()
-			defer c.stateMutex.Unlock()
-			c.connectToEachPlayer(context.Background(), msg.PlayerNames, msg.ClientListenAddrs)
-		}()
-
-		// Respond with an OK but add to the map later. Admin will be expecting this response before
-		// game start.
-		w.WriteHeader(http.StatusOK)
-
-	})
-
-	c.router.Path("/players").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c.Logger.Printf("Received GET /players")
-		c.stateMutex.Lock()
-		defer c.stateMutex.Unlock()
-
-		msg := utils.GetPlayersMessage{
-			ListenAddrOfPlayer: c.neighborListenAddr,
-		}
-
-		if err := json.NewEncoder(w).Encode(&msg); err != nil {
-			c.Logger.Printf("GET /players error: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		c.Logger.Printf("Received GET /players. Sending: %+v", msg)
-	})
-
 	c.router.Path("/ping").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "pong")
+	})
+
+	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardEvent)
+
+	c.router.Path("/players").Methods("POST").HandlerFunc(c.handleAddNewPlayers)
+
+	c.router.Path("/players").Methods("GET").HandlerFunc(c.handleGetPlayers)
+
+	c.router.Path("/state").Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c.stateMutex.Lock()
+		defer c.stateMutex.Unlock()
+		w.Write([]byte(c.clientState))
 	})
 
 	utils.RoutesSummary(c.router, c.Logger)
 }
 
-// Connects to each player as given in playerNames and playerListenAddrs
+func (c *PlayerClient) handleAddNewPlayers(w http.ResponseWriter, r *http.Request) {
+	var msg messages.AddNewPlayersMessage
+
+	err := json.NewDecoder(r.Body).Decode(&msg)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	// Set up the connection to the new player without blocking the http response to this call,
+	// otherwise we're going to have a deadlock with the other client.
+	go func() {
+		c.stateMutex.Lock()
+		defer c.stateMutex.Unlock()
+		c.connectToEachPlayer(context.Background(), msg.PlayerNames, msg.ClientListenAddrs)
+	}()
+
+	// Respond with an OK but add to the map later. Admin will be expecting this response before
+	// game start.
+	w.WriteHeader(http.StatusOK)
+}
+
+func (c *PlayerClient) handleGetPlayers(w http.ResponseWriter, r *http.Request) {
+	c.Logger.Printf("Received GET /players")
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	msg := messages.GetPlayersMessage{
+		ListenAddrOfPlayer: c.neighborListenAddr,
+	}
+
+	if err := json.NewEncoder(w).Encode(&msg); err != nil {
+		c.Logger.Printf("GET /players error: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	c.Logger.Printf("Received GET /players. Sending: %+v", msg)
+}
+
+func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Request) {
+	c.Logger.Printf("Received POST /event/served_cards")
+
+	var servedCardsEvent messages.ServedCardsEvent
+
+	err := json.NewDecoder(r.Body).Decode(&servedCardsEvent)
+	if err != nil {
+		c.Logger.Print(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		messages.WriteErrorPayload(w, err)
+		return
+	}
+
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	if c.clientState != WaitingForAdminToServeCards {
+		c.Logger.Printf("Unexpected admin event: %s", servedCardsEvent.RestPath())
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	servedCardsEvent.Table.LocalPlayerName = c.table.LocalPlayerName
+
+	uiCommand := &UICommandSetServedCards{
+		table: &servedCardsEvent.Table,
+	}
+
+	err = c.sendCommandToUI(uiCommand, 2*time.Second)
+	if err != nil {
+		c.Logger.Print(err)
+	}
+
+	c.clientState = WaitingForAdminToChoosePlayer
+}
+
+func (c *PlayerClient) sendCommandToUI(uiCommand UICommand, timeout time.Duration) error {
+	select {
+	case c.generalUICommandChan <- uiCommand:
+		return nil
+	case <-time.After(timeout):
+		return ErrorUIFailedToConsumeCommand
+	}
+}
+
+// Connects to each player as given in playerNames and playerListenAddrs and sends a AckNewPlayerAddedMessage response to server for each connected player
 func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.TCPAddress) {
 	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.String())
 
@@ -511,7 +452,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			c.Logger.Printf("Local player %s Successfully connected to %s, will send ack to admin", c.table.LocalPlayerName, playerName)
 
-			ackMsg := utils.AckNewPlayerAddedMessage{
+			ackMsg := messages.AckNewPlayerAddedMessage{
 				AckerPlayer: c.table.LocalPlayerName,
 				NewPlayer:   playerName,
 			}
@@ -520,7 +461,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 				Client:     c.httpClient,
 				Method:     "POST",
 				URL:        adminURL,
-				BodyReader: utils.MustJSONReader(&ackMsg),
+				BodyReader: messages.MustJSONReader(&ackMsg),
 			}
 
 			resp, err := requestSender.Send(ctxWithTimeout)

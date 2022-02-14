@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"encoding/json"
-	"github.com/rksht/uknow"
-	admin "github.com/rksht/uknow/admin"
-	"github.com/rksht/uknow/internal/utils"
-	client "github.com/rksht/uknow/player_client"
+	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/rksht/uknow"
+	admin "github.com/rksht/uknow/admin"
+	"github.com/rksht/uknow/internal/messages"
+	"github.com/rksht/uknow/internal/utils"
+	client "github.com/rksht/uknow/player_client"
 )
 
 type Configs struct {
@@ -29,7 +33,7 @@ func setupClientConfigs(names []string) map[string]configAndChannels {
 	for i, name := range names {
 		commChannels := client.MakeCommChannels()
 		clientConfig := &client.ConfigNewPlayerClient{}
-		clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9000 + i}
+		clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 10001 + i}
 		clientConfig.LogWindowChan = commChannels.LogWindowChan
 		clientConfig.AskUIForUserTurnChan = commChannels.AskUIForUserTurnChan
 		clientConfig.DefaultCommandReceiverChan = commChannels.DefaultCommandReceiveChan
@@ -58,7 +62,6 @@ func setupConfig() *Configs {
 	clientConfig.Table = uknow.NewTable("alice")
 
 	adminConfig := &admin.ConfigNewAdmin{}
-	adminConfig.State = admin.StatusAddingPlayers
 	adminConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9010}
 	adminConfig.Table = uknow.NewAdminTable()
 
@@ -70,8 +73,8 @@ func setupConfig() *Configs {
 }
 
 func goRunDummyUI(commChannels client.CommChannels) {
-	dummyUI := &client.DummyUIState{}
-	dummyUI.Init(commChannels.AskUIForUserTurnChan, commChannels.LogWindowChan)
+	dummyUI := &client.DummyClientUI{}
+	dummyUI.Init(commChannels.GeneralUICommandChan, commChannels.AskUIForUserTurnChan, commChannels.LogWindowChan)
 
 	go dummyUI.RunAskUIDumper()
 	go dummyUI.RunWindowLogger()
@@ -113,7 +116,6 @@ func TestAddMultiplePlayers(t *testing.T) {
 	clientConfigMap := setupClientConfigs([]string{aliceName, jackName})
 
 	adminConfig := &admin.ConfigNewAdmin{}
-	adminConfig.State = admin.StatusAddingPlayers
 	adminConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9010}
 	adminConfig.Table = uknow.NewAdminTable()
 
@@ -167,7 +169,7 @@ func TestAddMultiplePlayers(t *testing.T) {
 		t.Fail()
 	}
 
-	var respMessage utils.GetPlayersMessage
+	var respMessage messages.GetPlayersMessage
 	if err := json.NewDecoder(resp.Body).Decode(&respMessage); err != nil {
 		t.Log(err)
 		t.FailNow()
@@ -179,4 +181,110 @@ func TestAddMultiplePlayers(t *testing.T) {
 		t.Logf("%s does not exist in jack's ListenAddrOfPlayer", aliceName)
 		t.Fail()
 	}
+}
+
+func TestUptoBothPlayersReady(t *testing.T) {
+	clientConfigMap := setupClientConfigs([]string{aliceName, jackName})
+
+	adminConfig := &admin.ConfigNewAdmin{}
+	adminConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 10000}
+	adminConfig.Table = uknow.NewAdminTable()
+	adminConfig.SetReadyPlayer = aliceName
+
+	admin := admin.NewAdmin(adminConfig)
+	clients := make(map[string]*client.PlayerClient)
+
+	for name, cc := range clientConfigMap {
+		clients[name] = client.NewPlayerClient(cc.clientConfig, client.DebugFlags{})
+	}
+
+	for name, cc := range clientConfigMap {
+		goRunDummyUI(cc.commChannels)
+
+		client := clients[name]
+		go client.RunServer()
+		go client.RunDefaultCommandHandler()
+	}
+
+	go admin.RunServer()
+
+	t.Log("done setting up admin and clients. waiting 1 sec...")
+	time.Sleep(1 * time.Second)
+
+	connectCmd := uknow.NewCommand(uknow.CmdConnect)
+	connectCmd.ExtraData = adminConfig.ListenAddr.HTTPAddress()
+
+	// Connect alice to admin
+	clientConfigMap[aliceName].commChannels.DefaultCommandReceiveChan <- connectCmd
+
+	t.Log("client alice should connect to admin. checking after 1 sec")
+	time.Sleep(1 * time.Second)
+
+	// Connect jack to admin
+	clientConfigMap[jackName].commChannels.DefaultCommandReceiveChan <- connectCmd
+	t.Log("client jack should connect to admin. checking after 1 sec")
+	time.Sleep(1 * time.Second)
+
+	// jack should now have connected to alice also
+	jackURL := clientConfigMap[jackName].clientConfig.ListenAddr.HTTPAddress()
+	resp, err := http.Get(jackURL + "/players")
+
+	t.Log("Received response from jack")
+
+	if err != nil {
+		t.Logf("Failed to GET /players at url: %s", jackURL+"/players")
+		t.Log(err)
+		t.Fail()
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fail()
+	}
+
+	var respMessage messages.GetPlayersMessage
+	if err := json.NewDecoder(resp.Body).Decode(&respMessage); err != nil {
+		t.Log(err)
+		t.FailNow()
+	}
+
+	t.Logf("jack GET /players response: %+v", respMessage)
+
+	if _, aliceExists := respMessage.ListenAddrOfPlayer[aliceName]; !aliceExists {
+		t.Logf("%s does not exist in jack's ListenAddrOfPlayer", aliceName)
+		t.Fail()
+	}
+
+	t.Logf("Jack sends `ready` command to admin")
+	readyCmd := uknow.NewCommand(uknow.CmdDeclareReady)
+	clientConfigMap[jackName].commChannels.DefaultCommandReceiveChan <- readyCmd
+	<-time.After(1 * time.Second)
+
+	checkState := func(name, url, expectedState string) {
+		resp, err = http.Get(url + "/state")
+
+		if err != nil {
+			t.Logf("Failed to GET /players at url: %s", jackURL+"/players")
+			t.Log(err)
+			t.Fail()
+		}
+
+		clientState, err := io.ReadAll(resp.Body)
+
+		if err != nil {
+			t.Log(err)
+			t.FailNow()
+		}
+
+		if string(clientState) != expectedState {
+			t.Logf("Player state of %s is %s != %s", name, clientState, expectedState)
+		}
+	}
+
+	aliceURL := clientConfigMap[aliceName].clientConfig.ListenAddr.HTTPAddress()
+
+	checkState(jackName, jackURL, "waiting_for_admin_to_choose_player")
+	checkState(aliceName, aliceURL, "waiting_for_admin_to_choose_player")
+
+	fmt.Print("Waiting 5 seconds before exiting...")
+	<-time.After(5 * time.Second)
 }

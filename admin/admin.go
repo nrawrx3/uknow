@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
+	"github.com/rksht/uknow/internal/messages"
 	"github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
@@ -109,6 +111,8 @@ const (
 	DoneSyncingPlayerDecision AdminState = "done_syncing_player_decision"
 )
 
+const countdownBeforeChoosingPlayer = 2 * time.Second
+
 type Admin struct {
 	table            *uknow.Table
 	stateMutex       sync.Mutex
@@ -123,17 +127,14 @@ type Admin struct {
 	httpServer         *http.Server
 	logger             *log.Logger
 
-	// expectingAcksMu         sync.Mutex
-	// expectingAcks           []expectedAck
-	// newExpectingAckReceived chan expectedAck
 	expectedAcksState *expectedAcksState
 }
 
-func (admin *Admin) getState() AdminState {
-	admin.stateMutex.Lock()
-	defer admin.stateMutex.Unlock()
-	return admin.state
-}
+// func (admin *Admin) getState() AdminState {
+// 	admin.stateMutex.Lock()
+// 	defer admin.stateMutex.Unlock()
+// 	return admin.state
+// }
 
 type ConfigNewAdmin struct {
 	ListenAddr     utils.TCPAddress
@@ -204,13 +205,11 @@ func (admin *Admin) RunServer() {
 }
 
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
-const perPlayerSyncCommandTimeout = time.Duration(5) * time.Second
-const addNewPlayerAckTimeout = time.Duration(10) * time.Second
-const askUserToPlayTimeout = time.Duration(20) * time.Second
 
 var errorWaitingForAcks = errors.New("waiting for acks")
 var errorInvalidAdminState = errors.New("invalid admin state")
 var errorUnknownPlayer = errors.New("unknown player")
+var errorHttpResponseFromClient = errors.New("error http response from client")
 
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
@@ -228,7 +227,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse message
-	var msg utils.AddNewPlayersMessage
+	var msg messages.AddNewPlayersMessage
 
 	err := json.NewDecoder(r.Body).Decode(&msg)
 	if err != nil {
@@ -271,7 +270,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerListenAddr.Host, newPlayerListenAddr.Port)
 
 	// Tell the new player about existing players. This is by sending AddNewPlayersMessage as a response containing the existing players info.
-	var respAddNewPlayersMessage utils.AddNewPlayersMessage
+	var respAddNewPlayersMessage messages.AddNewPlayersMessage
 	for playerName, playerListenAddr := range admin.listenAddrOfPlayer {
 		if playerName == newPlayerName {
 			continue
@@ -282,7 +281,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
-			utils.WriteErrorPayload(w, err)
+			messages.WriteErrorPayload(w, err)
 			continue
 		}
 		respAddNewPlayersMessage.Add(playerName, addr.Host, addr.Port, "http")
@@ -304,7 +303,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerName, newPlayerHost string, newPlayerPort int) {
 	// Message is same for all players. Create it.
-	var addPlayerMsg utils.AddNewPlayersMessage
+	var addPlayerMsg messages.AddNewPlayersMessage
 	addPlayerMsg.Add(newPlayerName, newPlayerHost, newPlayerPort, "http")
 
 	ctxForAllRequests, cancelFunc := context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
@@ -327,7 +326,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 				Client:     admin.httpClient,
 				Method:     "POST",
 				URL:        url,
-				BodyReader: utils.MustJSONReader(&addPlayerMsg),
+				BodyReader: messages.MustJSONReader(&addPlayerMsg),
 			}
 
 			resp, err := requestSender.Send(ctx)
@@ -369,11 +368,11 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Request) {
 	admin.logger.Println("handleAckNewPlayerAdded called")
 
-	var reqBody utils.AckNewPlayerAddedMessage
+	var reqBody messages.AckNewPlayerAddedMessage
 	err := json.NewDecoder(r.Body).Decode(&reqBody)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		utils.WriteErrorPayload(w, err)
+		messages.WriteErrorPayload(w, err)
 		return
 	}
 
@@ -389,7 +388,7 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 }
 
-// Req: POST /set_ready
+// Req: POST /set_ready SetReadyMessage
 //
 // Resp: StatusForbidden
 // Resp: SeeOther, UnwrappedErrorPayload
@@ -410,7 +409,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if senderPlayerName != admin.setReadyPlayer {
+	if admin.setReadyPlayer != "" && (senderPlayerName != admin.setReadyPlayer) {
 		admin.logger.Printf("player %s not set as setReadyPlayer", senderPlayerName)
 		w.WriteHeader(http.StatusForbidden)
 		return
@@ -421,7 +420,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 	if admin.state != AddingPlayers {
 		admin.logger.Printf("Expecting admin state: %s, but have %s", AddingPlayers, admin.state)
 
-		errorResponse := utils.UnwrappedErrorPayload{}
+		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: Failed due to %w", errorInvalidAdminState))
 		json.NewEncoder(w).Encode(errorResponse)
 		w.WriteHeader(http.StatusForbidden)
@@ -435,7 +434,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		admin.expectedAcksState.mu.Unlock()
 		admin.logger.Printf("handleSetReady: cannot change to ready state, numExpectingAcks = %d (!= 0)", numExpectingAcks)
 
-		errorResponse := utils.UnwrappedErrorPayload{}
+		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: %w, numExpectingAcks: %d", errorWaitingForAcks, numExpectingAcks))
 		json.NewEncoder(w).Encode(errorResponse)
 		w.WriteHeader(http.StatusSeeOther)
@@ -443,11 +442,11 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	admin.expectedAcksState.mu.Unlock()
 
-	var setReadyMessage utils.SetReadyMessage
+	var setReadyMessage messages.SetReadyMessage
 	err = json.NewDecoder(r.Body).Decode(&setReadyMessage)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		utils.WriteErrorPayload(w, err)
+		messages.WriteErrorPayload(w, err)
 		return
 	}
 
@@ -455,23 +454,77 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	// serve cards and serve
 	admin.table.ShufflerName = setReadyMessage.ShufflerName
-	admin.table.ShuffleDeckAndDistribute()
+	admin.table.ShuffleDeckAndDistribute(8)
 
 	if setReadyMessage.ShufflerIsFirstPlayer {
 		admin.table.NextPlayerToDraw = admin.table.ShufflerName
 	}
 
-	go admin.syncTableWithAllPlayers("serving")
+	go admin.sendServeCardsEventToAllPlayers()
 
 	w.WriteHeader(http.StatusOK)
 }
 
-func (admin *Admin) syncTableWithAllPlayers(syncReason string) {
+// Call this to broadcast the event too all players. We can essentially send any []byte, but we make a decision to use this to only send event messages.
+func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath string, requestStruct interface{}) error {
+	ctx, _ = context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
+	g, ctx := errgroup.WithContext(ctx)
+
+	for playerName, playerAddr := range admin.listenAddrOfPlayer {
+		playerName := playerName
+		playerAddr := playerAddr
+
+		g.Go(func() error {
+			return admin.sendMessageToPlayer(ctx, playerName, playerAddr, eventRestPath, messages.MustJSONReader(requestStruct))
+		})
+	}
+
+	return g.Wait()
 }
 
-func (admin *Admin) playerCommandURL(playerName string) string {
-	listenAddr := admin.listenAddrOfPlayer[playerName]
-	return listenAddr.HTTPAddress() + "/command"
+func (admin *Admin) sendMessageToPlayer(
+	ctx context.Context,
+	playerName string,
+	playerAddr utils.TCPAddress,
+	eventRestPath string,
+	requestBodyReader io.Reader) error {
+
+	playerURL := fmt.Sprintf("%s/event/%s", playerAddr.String(), eventRestPath)
+
+	req := utils.RequestSender{
+		Client:     admin.httpClient,
+		Method:     "POST",
+		URL:        playerURL,
+		BodyReader: requestBodyReader,
+	}
+
+	resp, err := req.Send(ctx)
+	if err != nil {
+		return NewSendEventMessageFailedError(playerName, eventRestPath, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return NewSendEventMessageFailedError(playerName, eventRestPath, NewHTTPResponseCodeError(resp.StatusCode))
+	}
+
+	return nil
+}
+
+func (admin *Admin) sendServeCardsEventToAllPlayers() {
+	eventMsg := messages.ServedCardsEvent{Table: *admin.table}
+
+	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
+
+	if err != nil {
+		admin.logger.Printf("sendServeCardsEventToAllPlayers failed: %s", err)
+		return
+	}
+
+	admin.logger.Printf("sendServeCardsEventToAllPlayers success")
+
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+	admin.state = CardsServed
 }
 
 func (admin *Admin) setReady() {
@@ -497,7 +550,7 @@ type EnvConfig struct {
 	ListenAddr     string `split_words:"true" required:"true"`
 	ListenPort     int    `split_words:"true" required:"true"`
 	RunREPL        bool   `split_words:"true" required:"false" default:"true"`
-	SetReadyPlayer string `split_words:"true", required:"true"`
+	SetReadyPlayer string `split_words:"true" required:"true"`
 }
 
 func (admin *Admin) RunREPL() {
@@ -524,6 +577,21 @@ func (admin *Admin) RunREPL() {
 
 		if line == "acks" {
 			log.Printf("Expecting acks:\n%s", admin.expectedAcksState.ackIds())
+			continue
+		}
+
+		if line == "state" {
+			admin.stateMutex.Lock()
+			log.Printf("%s", admin.state)
+			admin.stateMutex.Unlock()
+			continue
+		}
+
+		if line == "table-summary" {
+			admin.stateMutex.Lock()
+			log.Print(admin.table.Summary())
+			admin.stateMutex.Unlock()
+			continue
 		}
 
 		_, err = uknow.ParseCommandFromInput(strings.TrimSpace(line))

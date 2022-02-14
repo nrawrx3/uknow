@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime"
 	"sort"
+	"strings"
 )
 
 var Logger = log.Default()
@@ -191,6 +192,22 @@ func NewAdminTable() *Table {
 	return createNewTable()
 }
 
+func (t *Table) Summary() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("DrawDeck count: %d\n", t.DrawDeck.Len()))
+	sb.WriteString(fmt.Sprintf("Pile count: %d\n", t.Pile.Len()))
+	sb.WriteString("Hand counts, Index:\n----------\n")
+	for playerName, hand := range t.HandOfPlayer {
+		sb.WriteString(fmt.Sprintf("%s: %d, %d\n", playerName, hand.Len(), t.IndexOfPlayer[playerName]))
+	}
+	sb.WriteString(fmt.Sprintf("Shuffler: %s\n", t.ShufflerName))
+	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.NextPlayerToDraw))
+	sb.WriteString(fmt.Sprintf("Direction: %d\n", t.Direction))
+
+	return sb.String()
+}
+
 func createNewTable() *Table {
 	return &Table{
 		DrawDeck:      NewFullDeck(),
@@ -198,6 +215,7 @@ func createNewTable() *Table {
 		HandOfPlayer:  make(map[string]Deck),
 		IndexOfPlayer: make(map[string]int),
 		PlayerNames:   make([]string, 0, 16),
+		Direction:     1,
 	}
 }
 
@@ -218,6 +236,16 @@ func (t *Table) AddPlayer(playerName string) error {
 	t.IndexOfPlayer[playerName] = len(t.PlayerNames) - 1
 	t.HandOfPlayer[playerName] = NewEmptyDeck()
 	return nil
+}
+
+func (t *Table) PlayerIndicesSortedByTurn() []int {
+	sortedIndices := make([]int, t.PlayerCount())
+	curIndex := t.IndexOfPlayer[t.NextPlayerToDraw]
+	for i := 0; i < t.PlayerCount(); i++ {
+		sortedIndices[i] = curIndex
+		curIndex = t.GetNextPlayerIndex(curIndex, 1)
+	}
+	return sortedIndices
 }
 
 func (t *Table) PlayerCount() int {
@@ -265,8 +293,11 @@ func (t *Table) RearrangePlayerIndices(indices []int) {
 	}
 }
 
-// This is one of the only moments where we have to communicate the shuffled indices
-func (t *Table) ShuffleDeckAndDistribute() {
+func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
+	if startingHandCount <= 0 || startingHandCount > 12 {
+		panic("Let's not use too large of a starting hand count")
+	}
+
 	deckSize := len(t.DrawDeck)
 	shuffledIndices := ShuffleIntRange(0, deckSize)
 
@@ -274,9 +305,17 @@ func (t *Table) ShuffleDeckAndDistribute() {
 		t.DrawDeck.Swap(i, j)
 	}
 
+	// Distribute
+	for playerName := range t.IndexOfPlayer {
+		t.HandOfPlayer[playerName] = t.DrawDeck[0:startingHandCount]
+		t.DrawDeck = t.DrawDeck[startingHandCount:len(t.DrawDeck)]
+	}
+
 	topCard, _ := t.DrawDeck.Top()
 	t.DrawDeck.Pop()
 	t.Pile.Push(topCard)
+
+	log.Printf("Top card: %+v", topCard)
 
 	if topCard.Number == CardReverse {
 		t.Direction = -t.Direction

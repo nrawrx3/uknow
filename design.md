@@ -81,33 +81,47 @@ Client state machine
 
 ```mermaid
 stateDiagram-v2
-	[*] --> s1: Wait for shuffle and serve
 
-	s1 --> s2: receive hand of cards and table state
+	state "Waiting to connect to admin" as s1
+	state "Waiting for admin to serve cards" as s2
+	state "Waiting for add new player messages" as s2
+	state "Waiting for admin to choose player, after syncing local table" as s3
 
-	s2 --> s3: wait for chosen player message
 
-	s3 --> s4: received chosen player message
+	[*] --> s1
 
-	s4 --> s5: we are chosen player
+	s1 --> s2: receive connect command from ui
 
-	s4 --> s6: we are not chosen player
+	s2 --> s3: receive serve cards event
 
-	s5 --> s7: ask user for decision command
+	s2 --> s2: receive add new player message
 
-	s7 --> s8: user gives valid decision command
+	s3 --> s4: wait for chosen player message
 
-	s8 --> s9: apply command and send replicate message to server
+	s4 --> s51: we are chosen player
 
-	s9 --> s10: wait for done-replicating message from server
+	s51 --> s6: ask player for decision and validate
 
-	s10 --> s2
+	s6 --> s51: invalid input
 
-	s6 --> s11: wait for command-replication message
+	s6 --> s7: replicate command in local
 
-	s11 --> s12: ack server after replication
+	s7 --> s8: send sync message to admin and wait for ack
 
-	s12 --> s2
+	s8 --> s3
+
+	s51 --> s61: we are not chosen player
+
+	s61 --> s71: wait for admin sync message
+
+	s71 --> s81: replicate table state using sync message
+
+	s81 --> s91: send replication ack to admin
+
+	s91 --> s3
 ```
 
 Starting approach
+
+- PlayerClient handles POST /event.
+- Creates a UI command based on the event and sends the command to ClientUI on a channel.
