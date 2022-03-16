@@ -2,8 +2,6 @@ package client
 
 import (
 	"log"
-
-	"github.com/rksht/uknow"
 )
 
 type EnvConfig struct {
@@ -35,16 +33,14 @@ func (conf *EnvConfig) GetDebugFlags() DebugFlags {
 	return flags
 }
 
-const defaultCommandServerHost = "localhost"
-
 type CommChannels struct {
 	GeneralUICommandChan chan UICommand
 
 	// The UI has a goroutine that receives info regarding player turn - and asks the player to input their decision - on this channel
-	AskUIForUserTurnChan chan *UICommandAskForUserInput
+	AskUIForUserTurnChan chan *UICommandAskUserForDecision
 
 	// The PlayerClient receives commands from the UI on this channel.
-	DefaultCommandReceiveChan chan uknow.Command
+	NonDecisionReplCommandsChan chan *ReplCommand
 
 	// The UI has a goroutine listening for log strings on this channel.
 	LogWindowChan chan string
@@ -53,8 +49,8 @@ type CommChannels struct {
 func MakeCommChannels() CommChannels {
 	var chans CommChannels
 	chans.GeneralUICommandChan = make(chan UICommand)
-	chans.AskUIForUserTurnChan = make(chan *UICommandAskForUserInput)
-	chans.DefaultCommandReceiveChan = make(chan uknow.Command)
+	chans.AskUIForUserTurnChan = make(chan *UICommandAskUserForDecision)
+	chans.NonDecisionReplCommandsChan = make(chan *ReplCommand)
 	chans.LogWindowChan = make(chan string, 64) // Logging to ui window doesn't have to be synchronous
 	return chans
 }

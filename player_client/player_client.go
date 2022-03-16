@@ -27,15 +27,14 @@ func maxInt(a, b int) int {
 
 type ClusterMap map[string]utils.TCPAddress // Map of player name to their public address
 
-const userDecisionTimeout = time.Duration(10) * time.Second
-
 type PlayerClientState string
 
 const (
 	WaitingToConnectToAdmin       PlayerClientState = "waiting_to_connect_to_admin"
 	WaitingForAdminToServeCards   PlayerClientState = "waiting_for_admin_to_serve_cards"
 	WaitingForAdminToChoosePlayer PlayerClientState = "waiting_for_admin_to_choose_player"
-	AskingUserForDecisionCommand  PlayerClientState = "asking_user_for_decision_command"
+	AskingUserForDecision         PlayerClientState = "asking_user_for_decision"
+	WaitingForDecisionSync        PlayerClientState = "waiting_for_decision_sync"
 )
 
 // func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
@@ -68,19 +67,25 @@ const (
 // 	expectingUserDecision bool // Set by client to make UI expect a user decision command
 // }
 
-var ErrorClientAwaitingApproval = errors.New("Client awaiting approval of previous command")
-var ErrorClientUnexpectedSender = errors.New("Unexpected sender")
-var ErrorFailedToConnectToNewPlayer = errors.New("Failed to connect to new player")
-var ErrorUIFailedToConsumeCommand = errors.New("UI Failed to consume command")
-var ErrorUnknownEvent = errors.New("Unknown event")
+var ErrorClientAwaitingApproval = errors.New("client awaiting approval of previous command")
+var ErrorClientUnexpectedSender = errors.New("unexpected sender")
+var ErrorFailedToConnectToNewPlayer = errors.New("failed to connect to new player")
+var ErrorUIFailedToConsumeCommand = errors.New("ui failed to consume command")
+var ErrorUnknownEvent = errors.New("unknown event")
+var ErrorFailedToEvaluateReplCommand = errors.New("failed to evaluate repl command")
 
+type ClientChannels struct {
+	GeneralUICommandPushChan       chan<- UICommand
+	AskUserForDecisionPushChan     chan<- *UICommandAskUserForDecision
+	NonDecisionReplCommandPullChan <-chan *ReplCommand
+	LogWindowPushChan              chan<- string
+}
 type PlayerClient struct {
 	// Used to protect the non-gui state
 	stateMutex  sync.Mutex
 	clientState PlayerClientState
 
-	table               *uknow.Table
-	cmdAwaitingApproval uknow.Command
+	table *uknow.Table
 
 	// Server used to service requests made by admin and other players
 	httpServer *http.Server
@@ -95,22 +100,17 @@ type PlayerClient struct {
 	// Exposes the player API to the game admin.
 	router *mux.Router
 
-	generalUICommandChan       chan<- UICommand
-	askForUserInputChan        chan<- *UICommandAskForUserInput
-	defaultCommandReceiverChan <-chan uknow.Command
-	logWindowChan              chan<- string
-	Logger                     *log.Logger
+	ClientChannels
+
+	Logger *log.Logger
 
 	debugFlags DebugFlags
 }
 
 type ConfigNewPlayerClient struct {
-	GeneralUICommandChan       chan<- UICommand
-	AskUIForUserTurnChan       chan<- *UICommandAskForUserInput
-	DefaultCommandReceiverChan <-chan uknow.Command
-	LogWindowChan              chan<- string
-	TestErrorChan              chan<- error
-	Table                      *uknow.Table
+	ClientChannels
+	TestErrorChan chan<- error
+	Table         *uknow.Table
 	// HttpListenAddr             string
 	ListenAddr       utils.TCPAddress
 	DefaultAdminAddr utils.TCPAddress
@@ -118,18 +118,14 @@ type ConfigNewPlayerClient struct {
 
 func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
 	c := &PlayerClient{
-		table:                      config.Table,
-		clientState:                WaitingToConnectToAdmin,
-		cmdAwaitingApproval:        uknow.NewCommand(uknow.CmdNone),
-		httpClient:                 utils.CreateHTTPClient(),
-		neighborListenAddr:         make(ClusterMap),
-		generalUICommandChan:       config.GeneralUICommandChan,
-		askForUserInputChan:        config.AskUIForUserTurnChan,
-		defaultCommandReceiverChan: config.DefaultCommandReceiverChan,
-		logWindowChan:              config.LogWindowChan,
-		Logger:                     utils.CreateFileLogger(false, config.Table.LocalPlayerName),
-		debugFlags:                 debugFlags,
-		adminAddr:                  config.DefaultAdminAddr,
+		table:              config.Table,
+		clientState:        WaitingToConnectToAdmin,
+		httpClient:         utils.CreateHTTPClient(),
+		neighborListenAddr: make(ClusterMap),
+		ClientChannels:     config.ClientChannels,
+		Logger:             utils.CreateFileLogger(false, config.Table.LocalPlayerName),
+		debugFlags:         debugFlags,
+		adminAddr:          config.DefaultAdminAddr,
 	}
 
 	c.router = mux.NewRouter()
@@ -144,6 +140,11 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 	c.Logger.Printf("Addr bind string = %s", config.ListenAddr.BindString())
 	c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
 
+	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
+	go (&dummyCardTransferEventConsumer{
+		decisionEventPullChan: DummyCardTransferEventConsumerChan,
+	}).RunConsumer(c.Logger)
+
 	return c
 }
 
@@ -156,32 +157,17 @@ func (c *PlayerClient) RunServer() {
 }
 
 // Meant to be running in its goroutine. Handles non-play or inspect related commands.
-func (c *PlayerClient) RunDefaultCommandHandler() {
+func (c *PlayerClient) RunGeneralCommandHandler() {
 	c.Logger.Printf("%s - running default command handler", c.table.LocalPlayerName)
 
 	ctx := context.Background()
 
-	for cmd := range c.defaultCommandReceiverChan {
+	for cmd := range c.NonDecisionReplCommandPullChan {
 		// Logging for now
 		c.Logger.Printf("default cmd `%+v`", cmd)
 
 		switch cmd.Kind {
-		case uknow.CmdQuit:
-			c.Logger.Printf("Shutdown server")
-			c.httpServer.Shutdown(context.Background())
-
-			uiStopChan := make(chan uknow.Command)
-			askUIargs := &UICommandAskForUserInput{
-				receive:     uiStopChan,
-				appQuitting: true,
-				sender:      uknow.ReservedNameClient,
-			}
-
-			c.Logger.Printf("Shutdown UI")
-			c.askForUserInputChan <- askUIargs
-			<-uiStopChan
-
-		case uknow.CmdConnect:
+		case CmdConnect:
 			c.Logger.Printf("Received a connect command from UI...")
 
 			// Building the message struct first since it doesn't depend on mutable state
@@ -192,7 +178,7 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 				adminAddr, err = utils.ResolveTCPAddress(adminAddrString)
 				if err != nil {
 					c.Logger.Print(err)
-					c.logWindowChan <- fmt.Sprint(err)
+					c.LogWindowPushChan <- fmt.Sprint(err)
 				}
 			} else {
 				adminAddr = c.adminAddr
@@ -210,7 +196,7 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 			// Lock and check if we have the correct state. Connect to admin if yes.
 			c.stateMutex.Lock()
 			if c.clientState != WaitingToConnectToAdmin {
-				c.logWindowChan <- fmt.Sprintf("Invalid command for current state: %s", c.clientState)
+				c.LogWindowPushChan <- fmt.Sprintf("Invalid command for current state: %s", c.clientState)
 				c.stateMutex.Unlock()
 				continue
 			}
@@ -218,14 +204,14 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 			c.connectToAdmin(ctx, msg, adminAddr)
 			c.stateMutex.Unlock()
 
-		case uknow.CmdDeclareReady:
+		case CmdDeclareReady:
 			c.Logger.Printf("Received a declare ready command from UI...")
 
 			url := fmt.Sprintf("%s/set_ready", c.adminAddr.String())
 
 			setReadyMessage := messages.SetReadyMessage{
 				ShufflerName:          c.table.LocalPlayerName,
-				ShufflerIsFirstPlayer: true,
+				ShufflerIsFirstPlayer: false,
 			}
 
 			resp, err := c.httpClient.Post(url, "application/json", messages.MustJSONReader(&setReadyMessage))
@@ -235,9 +221,14 @@ func (c *PlayerClient) RunDefaultCommandHandler() {
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				c.logWindowChan <- "Failed to send declare ready message"
+				c.LogWindowPushChan <- "Failed to send declare ready message"
 				c.Logger.Printf("Failed to send declare ready message, resp status code: %s", resp.Status)
 			}
+
+		case CmdShowHand:
+			c.Logger.Printf("Received showhand command from UI...")
+			// Just printing to event log window
+			c.logToWindow(c.table.HandOfPlayer[c.table.LocalPlayerName].String())
 
 		default:
 			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
@@ -255,7 +246,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 		c.Logger.Fatal(err)
 	}
 
-	// TODO: use ctx along with httpClient.Do
+	// CONSIDER: use ctx along with httpClient.Do
 	url := fmt.Sprintf("%s/player", adminAddr.String())
 	resp, err := c.httpClient.Post(url, "application/json", &body)
 	if err != nil {
@@ -284,27 +275,27 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 	}
 }
 
-func (c *PlayerClient) printTableInfo(uiState *ClientUI) {
-	handCounts := make(map[string]int)
-	for playerName, hand := range c.table.HandOfPlayer {
-		handCounts[playerName] = len(hand)
-	}
+// func (c *PlayerClient) printTableInfo(uiState *ClientUI) {
+// 	handCounts := make(map[string]int)
+// 	for playerName, hand := range c.table.HandOfPlayer {
+// 		handCounts[playerName] = len(hand)
+// 	}
 
-	msg := fmt.Sprintf(`
-Players:	%+v,
-Hand counts:	%+v,
-DrawDeck count: %+v,
-DiscardPile count: %+v`,
-		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
-	uiState.appendEventLog(msg)
-	c.Logger.Printf(msg)
-	c.logWindowChan <- msg
-}
+// 	msg := fmt.Sprintf(`
+// Players:	%+v,
+// Hand counts:	%+v,
+// DrawDeck count: %+v,
+// DiscardPile count: %+v`,
+// 		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
+// 	uiState.appendEventLog(msg)
+// 	c.Logger.Printf(msg)
+// 	c.LogWindowPushChan <- msg
+// }
 
 func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
 	format = "Client: " + format
 	message := fmt.Sprintf(format, args...)
-	c.logWindowChan <- message
+	c.LogWindowPushChan <- message
 	c.Logger.Print(message)
 }
 
@@ -313,7 +304,11 @@ func (c *PlayerClient) initRouterHandlers() {
 		fmt.Fprintf(w, "pong")
 	})
 
+	// NOTE(@rk): Event the message handlers and paths convention. Starts with "/event"
+
 	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardEvent)
+	c.router.Path("/event/chosen_player").Methods("POST").HandlerFunc(c.handleChosenPlayerEvent)
+	c.router.Path("/event/player_decisions_sync").Methods("POST").HandlerFunc(c.handlePlayerDecisionsSyncEvent)
 
 	c.router.Path("/players").Methods("POST").HandlerFunc(c.handleAddNewPlayers)
 
@@ -391,6 +386,7 @@ func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Requ
 	}
 
 	servedCardsEvent.Table.LocalPlayerName = c.table.LocalPlayerName
+	c.table.Set(&servedCardsEvent.Table)
 
 	uiCommand := &UICommandSetServedCards{
 		table: &servedCardsEvent.Table,
@@ -404,9 +400,175 @@ func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Requ
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
+func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Request) {
+	c.Logger.Printf("Received POST /event/served_cards")
+
+	var chosenPlayerEvent messages.ChosenPlayerEvent
+	err := json.NewDecoder(r.Body).Decode(&chosenPlayerEvent)
+	if err != nil {
+		c.Logger.Print(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		messages.WriteErrorPayload(w, err)
+		return
+	}
+
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	if c.clientState != WaitingForAdminToChoosePlayer {
+		c.Logger.Printf("Unexpected admin event: %s", chosenPlayerEvent.RestPath())
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if c.table.LocalPlayerName == chosenPlayerEvent.PlayerName {
+		c.logToWindow("It's our turn now!")
+	} else {
+		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
+		// TODO(@rk): Move to "waiting for player decision sync message from admin"
+	}
+
+	// TODO(@rk): next state
+	c.clientState = AskingUserForDecision
+	go c.askAndRunUserDecisions()
+}
+
+func (c *PlayerClient) askAndRunUserDecisions() {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	c.logToWindow("Asking for user decision")
+	c.logToWindow(c.table.Summary())
+
+	receiveReplCommandsChan := make(chan *ReplCommand)
+	allowOneMoreDecision := make(chan bool)
+
+	askCommand := &UICommandAskUserForDecision{
+		receive:              receiveReplCommandsChan,
+		allowOneMoreDecision: allowOneMoreDecision,
+		timeout:              10 * time.Second, // TODO(@rk): Unused and arbitrary. Think later.
+		sender:               "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
+	}
+
+	c.AskUserForDecisionPushChan <- askCommand
+
+	// Now consume the PlayerDecisionEvent(s) and send these to admin
+
+	decisions := make([]uknow.PlayerDecision, 0, 4)
+
+	for replCommand := range receiveReplCommandsChan {
+		decision, err := c.EvalReplCommandOnTable(replCommand)
+
+		if err != nil {
+			c.Logger.Print(err)
+			break
+		}
+
+		c.Logger.Printf("Received replCommand: %s, decisionEvent: %s", replCommand.Kind.String(), &decision)
+
+		decisions = append(decisions, decision)
+
+		// TODO(@rk): Uncomment. After proper game logic is implemented.
+		// allowOneMoreDecision <- c.table.NextPlayerToDraw == c.table.LocalPlayerName
+
+		// TODO(@rk): Remove. See above.
+		allowOneMoreDecision <- false
+	}
+
+	c.Logger.Printf("Done receiving player decision events from ClientUI")
+
+	// TODO(@rk): Send the PlayerDecisionEvent list as a request to admin on the /player_decisions path
+	requestBody := messages.PlayerDecisionsEvent{
+		Decisions:  decisions,
+		PlayerName: c.table.LocalPlayerName,
+	}
+
+	requester := utils.RequestSender{
+		URL:        fmt.Sprintf("%s/%s", c.adminAddr.String(), requestBody.RestPath()),
+		Method:     "POST",
+		Client:     c.httpClient,
+		BodyReader: messages.MustJSONReader(&requestBody),
+	}
+
+	resp, err := requester.Send(context.TODO())
+	if err != nil {
+		err := fmt.Errorf("askAndRunUserDecisions: %w", err)
+		c.Logger.Print(err)
+		c.logToWindow(err.Error())
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		c.Logger.Printf("askAndRunUserDecisions: Received status code %d from admin", resp.StatusCode)
+		return
+	}
+
+	// TODO(@rk): Is WaitingForAdminToChoosePlayer correct to be the next state?
+	c.Logger.Printf("Going to state %s", WaitingForAdminToChoosePlayer)
+	c.clientState = WaitingForAdminToChoosePlayer
+}
+
+// POST /player_decisions
+func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *http.Request) {
+	c.Logger.Printf("Received player_decisions_sync message")
+	var decisionsEvent messages.PlayerDecisionsSyncEvent
+	err := json.NewDecoder(r.Body).Decode(&decisionsEvent)
+	if err != nil {
+		c.Logger.Print(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		messages.WriteErrorPayload(w, err)
+		return
+	}
+
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	// Admin sends the sync event to all clients, including the client who generated the decisions. Handling this.
+	if decisionsEvent.PlayerName == c.table.LocalPlayerName {
+		return
+	}
+
+	if c.clientState != WaitingForDecisionSync {
+		c.Logger.Printf("Unexpected event %s received while in state %s", decisionsEvent.RestPath(), c.clientState)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, DummyCardTransferEventConsumerChan)
+
+	c.clientState = WaitingForAdminToChoosePlayer
+}
+
+func (c *PlayerClient) EvalReplCommandOnTable(replCommand *ReplCommand) (uknow.PlayerDecision, error) {
+	switch replCommand.Kind {
+	case CmdDropCard:
+		decisionEvent := uknow.PlayerDecision{
+			Kind:       uknow.PlayerDecisionPlayHandCard,
+			ResultCard: replCommand.Cards[0],
+		}
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+
+	case CmdDrawCard:
+		decisionEvent := uknow.PlayerDecision{
+			Kind: uknow.PlayerDecisionPullFromDeck,
+		}
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+
+	case CmdDrawCardFromPile:
+		decisionEvent := uknow.PlayerDecision{
+			Kind: uknow.PlayerDecisionPullFromDeck,
+		}
+
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+
+	default:
+		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())
+		return uknow.PlayerDecision{}, nil
+	}
+}
+
 func (c *PlayerClient) sendCommandToUI(uiCommand UICommand, timeout time.Duration) error {
 	select {
-	case c.generalUICommandChan <- uiCommand:
+	case c.GeneralUICommandPushChan <- uiCommand:
 		return nil
 	case <-time.After(timeout):
 		return ErrorUIFailedToConsumeCommand

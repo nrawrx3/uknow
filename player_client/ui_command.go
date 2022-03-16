@@ -19,19 +19,24 @@ type UICommandAddPlayer struct {
 
 func (*UICommandAddPlayer) uiCommandDummy() {}
 
-type UICommandAskForUserInput struct {
+type UICommandAskUserForDecision struct {
 	// The PlayerClient itself will wait on this channel to receive the command input from user
-	receive               chan<- uknow.Command
-	timeout               time.Duration
-	sender                string
-	appQuitting           bool // Set by client to let UI know that the app is stopping
-	expectingUserDecision bool // Set by client to make UI expect a user decision command
+	receive              chan<- *ReplCommand
+	allowOneMoreDecision <-chan bool
+	timeout              time.Duration
+	sender               string
 }
 
-func (*UICommandAskForUserInput) uiCommandDummy() {}
+func (*UICommandAskUserForDecision) uiCommandDummy() {}
 
 type UICommandSetServedCards struct {
 	table *uknow.Table
 }
 
 func (*UICommandSetServedCards) uiCommandDummy() {}
+
+type UICommandPlayCardTransferEvent struct {
+	event *uknow.CardTransferEvent
+}
+
+func (*UICommandPlayCardTransferEvent) uiCommandDummy() {}

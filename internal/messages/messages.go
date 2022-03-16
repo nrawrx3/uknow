@@ -11,27 +11,6 @@ import (
 	"github.com/rksht/uknow/internal/utils"
 )
 
-// type CommandPayload struct {
-// 	SenderName string        `json:"sender_name"`
-// 	Command    uknow.Command `json:"command"`
-// 	IsResponse bool          `json:"is_response"`
-
-// 	// For user decision commands, the admin is responsible for validating the play made by the player-client.
-// 	// NeedApproval is set to true for such cases. After the user decides the play, the player client
-// 	// waits until it gets approval from the admin.
-// 	NeedApproval bool `json:"need_approval"`
-// }
-
-// func DecodeCommandPayload(r io.Reader) (CommandPayload, error) {
-// 	var body CommandPayload
-
-// 	if err := json.NewDecoder(r).Decode(&body); err != nil {
-// 		return body, err
-// 	}
-
-// 	return body, nil
-// }
-
 type AddNewPlayersMessage struct {
 	PlayerNames       []string           `json:"player_names"`
 	ClientListenAddrs []utils.TCPAddress `json:"client_listen_addrs"`
@@ -79,11 +58,28 @@ func (*ServedCardsEvent) RestPath() string {
 }
 
 type ChosenPlayerEvent struct {
-	PlayerName string
+	PlayerName string `json:"player_name"`
 }
 
 func (*ChosenPlayerEvent) RestPath() string {
 	return "chosen_player"
+}
+
+type PlayerDecisionsEvent struct {
+	Decisions  []uknow.PlayerDecision `json:"events"`
+	PlayerName string                 `json:"player_name"`
+}
+
+func (*PlayerDecisionsEvent) RestPath() string {
+	return "player_decisions"
+}
+
+type PlayerDecisionsSyncEvent struct {
+	PlayerDecisionsEvent
+}
+
+func (*PlayerDecisionsSyncEvent) RestPath() string {
+	return "player_decisions_sync"
 }
 
 type UnwrappedErrorPayload struct {

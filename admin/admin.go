@@ -107,17 +107,16 @@ const (
 	CardsServed               AdminState = "cards_served"
 	PlayerChosenForTurn       AdminState = "player_chosen"
 	WaitingForPlayerDecision  AdminState = "waiting_for_player_decision"
-	ReceivedDecisionOfPlayer  AdminState = "received_decision_of_player"
+	SyncingPlayerDecision     AdminState = "syncing_player_decision"
 	DoneSyncingPlayerDecision AdminState = "done_syncing_player_decision"
 )
 
 const countdownBeforeChoosingPlayer = 2 * time.Second
 
 type Admin struct {
-	table            *uknow.Table
-	stateMutex       sync.Mutex
-	stateChangedCond *sync.Cond
-	state            AdminState
+	table      *uknow.Table
+	stateMutex sync.Mutex
+	state      AdminState
 
 	// Address of player registered on connect command
 	listenAddrOfPlayer map[string]utils.TCPAddress
@@ -129,12 +128,6 @@ type Admin struct {
 
 	expectedAcksState *expectedAcksState
 }
-
-// func (admin *Admin) getState() AdminState {
-// 	admin.stateMutex.Lock()
-// 	defer admin.stateMutex.Unlock()
-// 	return admin.state
-// }
 
 type ConfigNewAdmin struct {
 	ListenAddr     utils.TCPAddress
@@ -155,17 +148,9 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 		setReadyPlayer:     config.SetReadyPlayer,
 	}
 
-	admin.stateChangedCond = sync.NewCond(&admin.stateMutex)
-
 	admin.httpClient = utils.CreateHTTPClient()
 
-	r := mux.NewRouter()
-
-	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
-	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
-	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
-	r.Path("/test_command").Methods("POST")
-	utils.RoutesSummary(r, admin.logger)
+	r := admin.setRouterHandlers()
 
 	admin.httpServer = &http.Server{
 		Handler:           r,
@@ -177,6 +162,17 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 	}
 
 	return admin
+}
+
+func (admin *Admin) setRouterHandlers() *mux.Router {
+	r := mux.NewRouter()
+	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
+	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
+	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
+	r.Path("/player_decisions").Methods("POST").HandlerFunc(admin.handlePlayerDecisionsEvent)
+	r.Path("/test_command").Methods("POST")
+	utils.RoutesSummary(r, admin.logger)
+	return r
 }
 
 func (a *Admin) Restart() {
@@ -418,12 +414,11 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 	admin.logger.Printf("handleSetReady: called from address: %s", senderAddr.BindString())
 
 	if admin.state != AddingPlayers {
+		w.WriteHeader(http.StatusForbidden)
 		admin.logger.Printf("Expecting admin state: %s, but have %s", AddingPlayers, admin.state)
-
 		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: Failed due to %w", errorInvalidAdminState))
 		json.NewEncoder(w).Encode(errorResponse)
-		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
@@ -434,10 +429,12 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		admin.expectedAcksState.mu.Unlock()
 		admin.logger.Printf("handleSetReady: cannot change to ready state, numExpectingAcks = %d (!= 0)", numExpectingAcks)
 
+		w.WriteHeader(http.StatusSeeOther)
+
 		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: %w, numExpectingAcks: %d", errorWaitingForAcks, numExpectingAcks))
 		json.NewEncoder(w).Encode(errorResponse)
-		w.WriteHeader(http.StatusSeeOther)
+		return
 	}
 
 	admin.expectedAcksState.mu.Unlock()
@@ -452,7 +449,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	admin.state = ReadyToServeCards
 
-	// serve cards and serve
+	// shuffle and serve cards. then sync the table state with each player.
 	admin.table.ShufflerName = setReadyMessage.ShufflerName
 	admin.table.ShuffleDeckAndDistribute(8)
 
@@ -463,6 +460,63 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 	go admin.sendServeCardsEventToAllPlayers()
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// Req: POST /player_decisions_event
+func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Request) {
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	// DTL(@rk): What happens when the waiting player disconnects? I think anytime we stop receiving heartbeats, we should reset the admin and notify the clients that the admin is resetting.
+	if admin.state != WaitingForPlayerDecision {
+		w.WriteHeader(http.StatusSeeOther)
+		err := fmt.Errorf("%w: %s", errorInvalidAdminState, admin.state)
+		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err.Error())
+		errorResponse := messages.UnwrappedErrorPayload{}
+		errorResponse.Add(err)
+		json.NewEncoder(w).Encode(errorResponse)
+		return
+	}
+
+	var event messages.PlayerDecisionsEvent
+	err := json.NewDecoder(r.Body).Decode(&event)
+	if err != nil {
+		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	admin.logger.Printf("Received decisions event from player: %s", event.PlayerName)
+
+	go admin.syncPlayerDecisionListEvent(event)
+}
+
+func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEvent) {
+	// FILTHY(@rk): Just spawning this goroutine to consume the card transfer events. The admin does not have a UI, so we could is simply log it. Have to think.
+	transferEventsChan := make(chan uknow.CardTransferEvent)
+	go func() {
+		for transferEvent := range transferEventsChan {
+			admin.logger.Printf("Received %s", transferEvent.String())
+		}
+	}()
+
+	syncEvent := &messages.PlayerDecisionsSyncEvent{
+		PlayerDecisionsEvent: event,
+	}
+
+	admin.stateMutex.Lock()
+	admin.table.EvalPlayerDecisions(syncEvent.PlayerName, syncEvent.Decisions, transferEventsChan)
+	admin.state = SyncingPlayerDecision
+	admin.stateMutex.Unlock()
+
+	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
+	if err != nil {
+		// TODO(@rk): Don't handle for now. Happy path only
+		admin.logger.Printf("Failed to broadcast player decisions event: %s", err)
+		return
+	}
+
+	admin.state = DoneSyncingPlayerDecision
 }
 
 // Call this to broadcast the event too all players. We can essentially send any []byte, but we make a decision to use this to only send event messages.
@@ -491,6 +545,8 @@ func (admin *Admin) sendMessageToPlayer(
 
 	playerURL := fmt.Sprintf("%s/event/%s", playerAddr.String(), eventRestPath)
 
+	admin.logger.Printf("Sending to playerURL: %s", playerURL)
+
 	req := utils.RequestSender{
 		Client:     admin.httpClient,
 		Method:     "POST",
@@ -511,6 +567,9 @@ func (admin *Admin) sendMessageToPlayer(
 }
 
 func (admin *Admin) sendServeCardsEventToAllPlayers() {
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
 	eventMsg := messages.ServedCardsEvent{Table: *admin.table}
 
 	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
@@ -522,9 +581,30 @@ func (admin *Admin) sendServeCardsEventToAllPlayers() {
 
 	admin.logger.Printf("sendServeCardsEventToAllPlayers success")
 
+	admin.state = CardsServed
+
+	go admin.sendChosenPlayerEventToAllPlayers()
+}
+
+func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
+	admin.logger.Printf("Waiting %.0f seconds before sending chosen player event", countdownBeforeChoosingPlayer.Seconds())
+
+	<-time.After(countdownBeforeChoosingPlayer)
+
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
-	admin.state = CardsServed
+
+	eventMsg := messages.ChosenPlayerEvent{PlayerName: admin.table.NextPlayerToDraw}
+	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
+
+	if err != nil {
+		admin.logger.Printf("sendChosenPlayerEventToAllPlayers: %s", err)
+		return
+	}
+
+	admin.logger.Printf("sendChosenPlayerEventToAllPlayers success")
+
+	admin.state = WaitingForPlayerDecision
 }
 
 func (admin *Admin) setReady() {
@@ -594,21 +674,9 @@ func (admin *Admin) RunREPL() {
 			continue
 		}
 
-		_, err = uknow.ParseCommandFromInput(strings.TrimSpace(line))
-		if err != nil {
-			admin.logger.Print(err)
-		}
-
 		if line == "set_ready" || line == "sr" {
 			admin.setReady()
 		}
-	}
-}
-
-func (admin *Admin) executeCommand(adminCommand uknow.Command) {
-	switch adminCommand.Kind {
-	case uknow.CmdConnect: // **Only testing, not actually going to use this command**
-		// Ping all players
 	}
 }
 

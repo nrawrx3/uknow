@@ -23,7 +23,7 @@ func RunApp() {
 	flag.Parse()
 
 	if configPrefix == "" {
-		log.Print("Value --config-prefix not specified")
+		log.Print("Value -conf-prefix not specified")
 	}
 
 	log.Printf("Loading configs from file %s", configFile)
@@ -40,7 +40,7 @@ func RunApp() {
 	envConfig.PlayerName = strings.TrimSpace(envConfig.PlayerName)
 	debugFlags := envConfig.GetDebugFlags()
 
-	if !uknow.IsUserNameAllowed(envConfig.PlayerName) {
+	if !client.IsUserNameAllowed(envConfig.PlayerName) {
 		log.Fatalf("Only names with alphabet and underscore characters allowed, name given: %s", envConfig.PlayerName)
 	}
 
@@ -51,12 +51,16 @@ func RunApp() {
 
 	table := uknow.NewTable(envConfig.PlayerName)
 
+	clientChannels := client.ClientChannels{
+		GeneralUICommandPushChan:       commChannels.GeneralUICommandChan,
+		AskUserForDecisionPushChan:     commChannels.AskUIForUserTurnChan,
+		NonDecisionReplCommandPullChan: commChannels.NonDecisionReplCommandsChan,
+		LogWindowPushChan:              commChannels.LogWindowChan,
+	}
+
 	playerClientConfig := &client.ConfigNewPlayerClient{
-		GeneralUICommandChan:       commChannels.GeneralUICommandChan,
-		AskUIForUserTurnChan:       commChannels.AskUIForUserTurnChan,
-		DefaultCommandReceiverChan: commChannels.DefaultCommandReceiveChan,
-		LogWindowChan:              commChannels.LogWindowChan,
-		Table:                      table,
+		ClientChannels: clientChannels,
+		Table:          table,
 		ListenAddr: utils.TCPAddress{
 			Host:     envConfig.CommandListenHost,
 			Port:     envConfig.CommandListenPort,
@@ -68,21 +72,25 @@ func RunApp() {
 		playerClientConfig.DefaultAdminAddr = utils.TCPAddress{Host: envConfig.AdminHost, Port: envConfig.AdminPort}
 	}
 
+	// FILTHY(@rk):TODO(@rk): Delete this when done with proper implementation in ui
+	client.DummyCardTransferEventConsumerChan = make(chan uknow.CardTransferEvent)
+
 	c := client.NewPlayerClient(playerClientConfig, debugFlags)
 
 	go c.RunServer()
-	go c.RunDefaultCommandHandler()
+	go c.RunGeneralCommandHandler()
 
 	var clientUI client.ClientUI
 	clientUI.Init(debugFlags,
 		commChannels.GeneralUICommandChan,
 		commChannels.AskUIForUserTurnChan,
+		commChannels.NonDecisionReplCommandsChan,
 		commChannels.LogWindowChan)
 	defer ui.Close()
 
 	uknow.Logger = c.Logger
 
-	go clientUI.RunPollInputEvents(commChannels.DefaultCommandReceiveChan)
+	go clientUI.RunPollInputEvents(envConfig.PlayerName)
 	go clientUI.RunGeneralUICommandConsumer()
 	clientUI.RunDrawLoop()
 }

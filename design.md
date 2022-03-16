@@ -66,7 +66,7 @@ stateDiagram-v2
 
 	s2 --> s3: choose random player
 
-	s3 --> s4: ask for decision from chosen player
+	s3 --> s4: emit ChosenPlayer event
 
 	s4 --> s5: receive decision command from chosen player
 
@@ -86,6 +86,7 @@ stateDiagram-v2
 	state "Waiting for admin to serve cards" as s2
 	state "Waiting for add new player messages" as s2
 	state "Waiting for admin to choose player, after syncing local table" as s3
+	state "Asking player for decision" as s51
 
 
 	[*] --> s1
@@ -125,3 +126,12 @@ Starting approach
 
 - PlayerClient handles POST /event.
 - Creates a UI command based on the event and sends the command to ClientUI on a channel.
+
+The `Cards served` and `Player chosen` states are simply here to help debug. Since we already synced the cards as we reached the `Cards served` state, every player knows the chosen player.
+
+
+When the PlayerClient asks the user for decision, all eligible commands are logged as they are occuring in local. The commands are sent to admin and replayed. Same for all other players. The other players will know the next players turn in this way.
+
+1. Send UICommandAskUserForDecision to ClientUI on the askUserForDecisionChan.
+2. TODO(@rk): Compute the set of eligible repl commands that the user can make first.
+3. When the user inputs a repl command, *the table object will be used to run a goro that executes the command as well as send command transfer events on a channel that the clientUI will send to it.*

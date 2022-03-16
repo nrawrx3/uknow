@@ -34,9 +34,9 @@ func setupClientConfigs(names []string) map[string]configAndChannels {
 		commChannels := client.MakeCommChannels()
 		clientConfig := &client.ConfigNewPlayerClient{}
 		clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 10001 + i}
-		clientConfig.LogWindowChan = commChannels.LogWindowChan
-		clientConfig.AskUIForUserTurnChan = commChannels.AskUIForUserTurnChan
-		clientConfig.DefaultCommandReceiverChan = commChannels.DefaultCommandReceiveChan
+		clientConfig.LogWindowPushChan = commChannels.LogWindowChan
+		clientConfig.AskUserForDecisionPushChan = commChannels.AskUIForUserTurnChan
+		clientConfig.GeneralUICommandPushChan = commChannels.GeneralUICommandChan
 		clientConfig.Table = uknow.NewTable(name)
 
 		cc := configAndChannels{
@@ -55,9 +55,9 @@ func setupConfig() *Configs {
 	commChannels := client.MakeCommChannels()
 	clientConfig := &client.ConfigNewPlayerClient{}
 	clientConfig.ListenAddr = utils.TCPAddress{Host: "localhost", Port: 9000}
-	clientConfig.LogWindowChan = commChannels.LogWindowChan
-	clientConfig.AskUIForUserTurnChan = commChannels.AskUIForUserTurnChan
-	clientConfig.DefaultCommandReceiverChan = commChannels.DefaultCommandReceiveChan
+	clientConfig.LogWindowPushChan = commChannels.LogWindowChan
+	clientConfig.AskUserForDecisionPushChan = commChannels.AskUIForUserTurnChan
+	clientConfig.GeneralUICommandPushChan = commChannels.GeneralUICommandChan
 
 	clientConfig.Table = uknow.NewTable("alice")
 

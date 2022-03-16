@@ -21,9 +21,15 @@ func LogInfo(format string, args ...interface{}) {
 	Logger.Printf(format, args...)
 }
 
+var ErrorCouldNotFindCard = "could not find card in given deck"
+
 type Card struct {
 	Number Number
 	Color  Color
+}
+
+func (c *Card) String() string {
+	return fmt.Sprintf("%s of %s", c.Number.String(), c.Color.String())
 }
 
 // Special cards
@@ -99,6 +105,26 @@ func (c *Color) String() string {
 
 type Deck []Card
 
+func (d Deck) String() string {
+	if len(d) == 0 {
+		return "[]"
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString("[")
+
+	for _, card := range d[0 : len(d)-1] {
+		sb.WriteString(card.String())
+		sb.WriteString("|")
+	}
+
+	sb.WriteString(d[len(d)-1].String())
+	sb.WriteString("]")
+
+	return sb.String()
+}
+
 func (d Deck) Len() int {
 	return len(d)
 }
@@ -158,6 +184,13 @@ func (d Deck) Top() (Card, error) {
 	return d[len(d)-1], nil
 }
 
+func (d Deck) MustTop() Card {
+	if d.IsEmpty() {
+		panic("Deck.MustTop() called on empty deck")
+	}
+	return d[len(d)-1]
+}
+
 func (d Deck) Pop() (Deck, error) {
 	if d.IsEmpty() {
 		return d, errors.New("Empty deck")
@@ -165,8 +198,33 @@ func (d Deck) Pop() (Deck, error) {
 	return d[0 : len(d)-1], nil
 }
 
+func (d Deck) MustPop() Deck {
+	if d.IsEmpty() {
+		panic("Deck.MustPop() called on an empty deck")
+	}
+	return d[0 : len(d)-1]
+}
+
 func (d Deck) RemoveCard(index int) Deck {
 	return append(d[0:index], d[index+1:]...)
+}
+
+func (d Deck) FindCard(wantedCard Card) (int, error) {
+	for i, card := range d {
+		if card.Number == wantedCard.Number && card.Color == wantedCard.Color {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: %s", wantedCard.String())
+}
+
+func (d Deck) MustFindCard(wantedCard Card) int {
+	for i, card := range d {
+		if card.Number == wantedCard.Number && card.Color == wantedCard.Color {
+			return i
+		}
+	}
+	panic(fmt.Sprintf("Could not find card '%s' in given deck", wantedCard.String()))
 }
 
 type Table struct {
@@ -186,6 +244,20 @@ func NewTable(localPlayerName string) *Table {
 	table.LocalPlayerName = localPlayerName
 	table.AddPlayer(localPlayerName)
 	return table
+}
+
+// Shallow-copies other into the receiver table
+func (t *Table) Set(other *Table) {
+	t.DrawDeck = other.DrawDeck
+	t.Pile = other.Pile
+	t.IndexOfPlayer = other.IndexOfPlayer
+	t.HandOfPlayer = other.HandOfPlayer
+	t.PlayerNames = other.PlayerNames
+	// NOTE: Not copying local player name since it doesn't make sense.
+	// CONSIDER: In fact, we could get rid of the LocalPlayerName field altogether and pass it around instead.
+	t.ShufflerName = other.ShufflerName
+	t.NextPlayerToDraw = other.NextPlayerToDraw
+	t.Direction = other.Direction
 }
 
 func NewAdminTable() *Table {
@@ -325,23 +397,97 @@ func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
 	t.NextPlayerToDraw = t.PlayerNames[indexOfNextPlayer]
 }
 
-// func (p *Player) PullCard(t *Table) (Card, error) {
-// 	if t.DrawDeck.IsEmpty() {
-// 		return Card{}, errors.New("DrawDeck empty")
-// 	}
+const (
+	EligiblePlayerActionPullFromDeck = iota
+	EligiblePlayerActionPullFromPile
+	EligiblePlayerActionPlayCardFromHand
+)
 
-// 	topCard, _ := t.DrawDeck.Top()
-// 	p.Hand = p.Hand.Push(topCard)
-// 	t.DrawDeck, _ = t.DrawDeck.Pop()
-// 	return topCard, nil
-// }
+type EligiblePlayerActionInfo struct {
+	Action        int
+	EligibleCards Deck
+}
 
-// func (p *Player) DropCard(cardIndex int, t *Table) (Card, error) {
-// 	card := p.Hand[cardIndex]
-// 	t.Pile = t.Pile.Push(card)
-// 	if cardIndex >= len(p.Hand) {
-// 		return Card{}, errors.New(fmt.Sprintf("Invalid card index '%d'", cardIndex))
-// 	}
-// 	p.Hand = p.Hand.RemoveCard(cardIndex)
-// 	return card, nil
-// }
+type PlayerDecisionKind int
+
+//go:generate stringer -type=PlayerDecisionKind
+const (
+	PlayerDecisionPullFromDeck PlayerDecisionKind = iota + 1
+	PlayerDecisionPullFromPile
+	PlayerDecisionPlayHandCard
+)
+
+type PlayerDecision struct {
+	Kind       PlayerDecisionKind
+	ResultCard Card // Only required when Kind == PlayerDecisionPlayHandCard
+}
+
+func (e *PlayerDecision) String() string {
+	resultCard := ""
+	if e.Kind == PlayerDecisionPlayHandCard {
+		resultCard = ": " + e.ResultCard.String()
+	}
+	return fmt.Sprintf("%s%s", e.Kind.String(), resultCard)
+}
+
+func (t *Table) EvalPlayerDecisions(playerName string, decisions []PlayerDecision, transferEventsChan chan<- CardTransferEvent) {
+	for _, decision := range decisions {
+		t.EvalPlayerDecision(playerName, decision, transferEventsChan)
+	}
+}
+
+// TODO(@rk): Incomplete. Takes a decision event, "evaluates" the bare minimum, i.e. update deck/pile/hand of the decision player and pushes the event to the transferEventChan. We need to do the whole "game logic" in this function.
+func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) PlayerDecision {
+	handOfPlayer := t.HandOfPlayer[playerName]
+
+	switch decision.Kind {
+	case PlayerDecisionPullFromDeck:
+		topCard := t.DrawDeck.MustTop()
+		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
+		t.DrawDeck = t.DrawDeck.MustPop()
+
+		transferEventsChan <- CardTransferEvent{
+			Source:     CardTransferNodeDeck,
+			Sink:       CardTransferNodePlayerHand,
+			SinkPlayer: playerName,
+		}
+
+		decision.ResultCard = topCard
+
+	case PlayerDecisionPullFromPile:
+		topCard := t.Pile.MustTop()
+		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
+		t.Pile = t.Pile.MustPop()
+
+		transferEventsChan <- CardTransferEvent{
+			Source:     CardTransferNodePile,
+			Sink:       CardTransferNodePlayerHand,
+			SinkPlayer: playerName,
+		}
+
+		decision.ResultCard = topCard
+
+	case PlayerDecisionPlayHandCard:
+		t.PlayCard(playerName, decision.ResultCard, transferEventsChan)
+	}
+
+	return decision
+}
+
+// TODO(@rk): Incomplete. See EvalPlayerDecisionEvent
+func (t *Table) PlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) {
+	// Remove card from hand and put it on pile
+	hand := t.HandOfPlayer[playerName]
+	cardLoc := hand.MustFindCard(cardToPlay)
+	hand = append(hand[0:cardLoc], hand[cardLoc+1:]...)
+	t.HandOfPlayer[playerName] = hand
+	t.Pile.Push(cardToPlay)
+
+	transferEventsChan <- CardTransferEvent{
+		Source:       CardTransferNodePlayerHand,
+		Sink:         CardTransferNodePile,
+		SourcePlayer: playerName,
+	}
+
+	// TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
+}
