@@ -130,7 +130,7 @@ func (d Deck) Len() int {
 }
 
 func (d Deck) Less(i, j int) bool {
-	return d[i].Number < d[j].Number || d[i].Number == d[j].Number && d[i].Color == d[j].Color
+	return d[i].Color < d[j].Color || (d[i].Number < d[j].Number) || (i < j)
 }
 
 func (d Deck) Swap(i, j int) {
@@ -215,7 +215,15 @@ func (d Deck) FindCard(wantedCard Card) (int, error) {
 			return i, nil
 		}
 	}
-	return 0, fmt.Errorf("%w: %s", wantedCard.String())
+	return 0, fmt.Errorf("could not find card %s", wantedCard.String())
+}
+
+func (d Deck) FindAndRemoveCard(wantedCard Card) (Deck, error) {
+	index, err := d.FindCard(wantedCard)
+	if err != nil {
+		return d, fmt.Errorf("could not remove card: %w", err)
+	}
+	return d.RemoveCard(index), nil
 }
 
 func (d Deck) MustFindCard(wantedCard Card) int {
@@ -442,6 +450,7 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 
 	switch decision.Kind {
 	case PlayerDecisionPullFromDeck:
+		// TODO(@rk): Related to logic - can't allow player to draw card if there's no card in dec
 		topCard := t.DrawDeck.MustTop()
 		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
 		t.DrawDeck = t.DrawDeck.MustPop()
@@ -450,11 +459,13 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 			Source:     CardTransferNodeDeck,
 			Sink:       CardTransferNodePlayerHand,
 			SinkPlayer: playerName,
+			Card:       topCard,
 		}
 
 		decision.ResultCard = topCard
 
 	case PlayerDecisionPullFromPile:
+		// TODO(@rk): See above
 		topCard := t.Pile.MustTop()
 		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
 		t.Pile = t.Pile.MustPop()
@@ -463,6 +474,7 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 			Source:     CardTransferNodePile,
 			Sink:       CardTransferNodePlayerHand,
 			SinkPlayer: playerName,
+			Card:       topCard,
 		}
 
 		decision.ResultCard = topCard

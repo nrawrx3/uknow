@@ -37,6 +37,7 @@ func setupClientConfigs(names []string) map[string]configAndChannels {
 		clientConfig.LogWindowPushChan = commChannels.LogWindowChan
 		clientConfig.AskUserForDecisionPushChan = commChannels.AskUIForUserTurnChan
 		clientConfig.GeneralUICommandPushChan = commChannels.GeneralUICommandChan
+		clientConfig.CardTransferEventPushChan = commChannels.CardTransferEventChan
 		clientConfig.Table = uknow.NewTable(name)
 
 		cc := configAndChannels{

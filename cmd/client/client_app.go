@@ -56,6 +56,7 @@ func RunApp() {
 		AskUserForDecisionPushChan:     commChannels.AskUIForUserTurnChan,
 		NonDecisionReplCommandPullChan: commChannels.NonDecisionReplCommandsChan,
 		LogWindowPushChan:              commChannels.LogWindowChan,
+		CardTransferEventPushChan:      commChannels.CardTransferEventChan,
 	}
 
 	playerClientConfig := &client.ConfigNewPlayerClient{
@@ -85,13 +86,15 @@ func RunApp() {
 		commChannels.GeneralUICommandChan,
 		commChannels.AskUIForUserTurnChan,
 		commChannels.NonDecisionReplCommandsChan,
+		commChannels.CardTransferEventChan,
 		commChannels.LogWindowChan)
 	defer ui.Close()
 
 	uknow.Logger = c.Logger
 
 	go clientUI.RunPollInputEvents(envConfig.PlayerName)
-	go clientUI.RunGeneralUICommandConsumer()
+	go clientUI.RunGeneralUICommandConsumer(envConfig.PlayerName)
+	go clientUI.RunCardTransferEventProcessor(envConfig.PlayerName)
 	clientUI.RunDrawLoop()
 }
 
