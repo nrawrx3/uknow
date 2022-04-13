@@ -2,6 +2,8 @@ package client
 
 import (
 	"log"
+
+	"github.com/rksht/uknow"
 )
 
 type EnvConfig struct {
@@ -33,6 +35,7 @@ func (conf *EnvConfig) GetDebugFlags() DebugFlags {
 	return flags
 }
 
+// Channels used for communication between the client components - PlayerClientUI and PlayerClient
 type CommChannels struct {
 	GeneralUICommandChan chan UICommand
 
@@ -44,6 +47,9 @@ type CommChannels struct {
 
 	// The UI has a goroutine listening for log strings on this channel.
 	LogWindowChan chan string
+
+	// The PlayerClient sends card transfer events on this channel after executing game logic. The PlayerClientUI receives these and updates the UI.
+	CardTransferEventChan chan uknow.CardTransferEvent
 }
 
 func MakeCommChannels() CommChannels {
@@ -52,5 +58,6 @@ func MakeCommChannels() CommChannels {
 	chans.AskUIForUserTurnChan = make(chan *UICommandAskUserForDecision)
 	chans.NonDecisionReplCommandsChan = make(chan *ReplCommand)
 	chans.LogWindowChan = make(chan string, 64) // Logging to ui window doesn't have to be synchronous
+	chans.CardTransferEventChan = make(chan uknow.CardTransferEvent)
 	return chans
 }

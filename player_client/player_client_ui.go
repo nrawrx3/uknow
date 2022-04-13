@@ -3,7 +3,10 @@ package client
 import (
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
@@ -27,14 +30,16 @@ const (
 )
 
 type ClientUIChannels struct {
-	GeneralUICommandPullChan   <-chan UICommand
-	AskUserForDecisionPullChan <-chan *UICommandAskUserForDecision
-
-	GeneralReplCommandPushChan chan<- *ReplCommand
-
+	GeneralUICommandPullChan   <-chan UICommand                    // For one-off commands and events
+	AskUserForDecisionPullChan <-chan *UICommandAskUserForDecision // Tells the UI component that it should expect decision commands from player
+	CardTransferEventPullChan  <-chan uknow.CardTransferEvent      // Consumes card transfer events
 	// Used to print logs into the event log
 	LogWindowPullChan <-chan string
+
+	GeneralReplCommandPushChan chan<- *ReplCommand
 }
+
+const numCardsToShowInPile = 10
 
 type ClientUI struct {
 	// stateMutex protects the uiState field. We must take care to always lock the mutexes in the order as they appear in this struct to prevent deadlocks.
@@ -43,20 +48,24 @@ type ClientUI struct {
 	uiState    ClientUIState
 
 	// Signalling the UI process that we have updated UI data is done by the actionCond and concurrent
-	// rw is protected by the actionMutex
-	actionMutex       sync.Mutex // protects access to every widget object
-	actionCond        *sync.Cond // used to signal to UI goro that widget data has been updated and should be drawn
+	// rw is protected by the uiActionMutex
+	uiActionMutex     sync.Mutex // protects access to every widget object
+	uiActionCond      *sync.Cond // used to signal to UI goro that widget data has been updated and should be drawn
 	action            uiAction
 	grid              *ui.Grid
-	pileCell          *widgets.Paragraph
+	pileList          *widgets.List
 	eventLogCell      *widgets.Paragraph
 	commandPromptCell *widgets.Paragraph
 	drawDeckGauge     *widgets.Gauge
 	handCountChart    *widgets.BarChart
+	selfHandWidget    *widgets.Paragraph
+	discardPile       uknow.Deck    // Not a widget itself, but the pileCell gets its data from here
+	playerHand        uknow.Deck    // Not widget itself, but the playerHandCell gets its data from here
+	discardPileCells  []interface{} // Stores *widgets.Paragraph(s)
 
 	commandPromptMutex      sync.Mutex
 	commandStringBeingTyped string
-	commandHistory          []string
+	commandHistory          []string // TODO(@rk): Fix this. =)
 	commandHistoryIndex     int
 
 	ClientUIChannels
@@ -68,11 +77,11 @@ type ClientUI struct {
 }
 
 func (clientUI *ClientUI) notifyRedrawUI(action uiAction, exec func()) {
-	clientUI.actionCond.L.Lock()
-	defer clientUI.actionCond.L.Unlock()
+	clientUI.uiActionCond.L.Lock()
+	defer clientUI.uiActionCond.L.Unlock()
 	exec()
 	clientUI.action = action
-	clientUI.actionCond.Signal()
+	clientUI.uiActionCond.Signal()
 }
 
 func (clientUI *ClientUI) handleCommandInput(playerName string) {
@@ -109,18 +118,15 @@ func (clientUI *ClientUI) handleCommandInput(playerName string) {
 	clientUI.resetCommandPrompt("", true)
 }
 
-func (clientUI *ClientUI) logUserDecisionCommand(command ReplCommand, commandChan chan<- ReplCommand) {
-	if clientUI.debugFlags.NoAdmin {
-		clientUI.appendEventLog(fmt.Sprintf("User decision command: %+v", command))
-		commandChan <- command
-	}
-}
-
 func (clientUI *ClientUI) appendEventLog(line string) {
 	clientUI.notifyRedrawUI(uiRedraw, func() {
 		clientUI.eventLogCell.Text = fmt.Sprintf("%s\n%s", clientUI.eventLogCell.Text, line)
 		// uknow.Logger.Println(line)
 	})
+}
+
+func (clientUI *ClientUI) appendEventLogNoLock(line string) {
+	clientUI.eventLogCell.Text = fmt.Sprintf("%s\n%s", clientUI.eventLogCell.Text, line)
 }
 
 func (clientUI *ClientUI) appendCommandPrompt(s string) {
@@ -160,7 +166,8 @@ func (clientUI *ClientUI) resetCommandPrompt(text string, addCurrentTextToHistor
 }
 
 // DOES NOT LOCK actionMutex
-func (clientUI *ClientUI) refillHandcountChart(table *uknow.Table) {
+func (clientUI *ClientUI) initTableElements(table *uknow.Table, localPlayerName string) {
+	// Initialize the handCountChart
 	playerCount := len(table.PlayerNames)
 
 	if len(clientUI.handCountChart.Labels) < playerCount {
@@ -171,19 +178,61 @@ func (clientUI *ClientUI) refillHandcountChart(table *uknow.Table) {
 		clientUI.handCountChart.Data = clientUI.handCountChart.Data[0:playerCount]
 	}
 
+	clientUI.sortHandCountChartByTurn(table)
+
+	// Initialize the draw deck
+	clientUI.drawDeckGauge.Percent = table.DrawDeck.Len()
+
+	// Update the pile cells
+	clientUI.updateDiscardPileCells()
+
+	// Initialize the player hand widget
+	for _, card := range table.HandOfPlayer[localPlayerName] {
+		clientUI.playerHand = clientUI.playerHand.Push(card)
+	}
+	sort.Sort(clientUI.playerHand)
+	clientUI.updatePlayerHandWidget()
+}
+
+func (clientUI *ClientUI) sortHandCountChartByTurn(table *uknow.Table) {
+	chart := clientUI.handCountChart
+
 	for i, playerIndex := range table.PlayerIndicesSortedByTurn() {
 		playerName := table.PlayerNames[playerIndex]
-		clientUI.handCountChart.Labels[i] = playerName
-		clientUI.handCountChart.Data[i] = float64(len(table.HandOfPlayer[playerName]))
+		chart.Labels[i] = playerName
+		chart.Data[i] = float64(len(table.HandOfPlayer[playerName]))
 	}
+
+	for i := range chart.Labels {
+		if i == 0 {
+			chart.LabelStyles[i] = ui.NewStyle(ui.ColorRed)
+		} else {
+			chart.LabelStyles[i] = ui.NewStyle(ui.ColorBlue)
+		}
+	}
+
+	clientUI.appendEventLogNoLock(fmt.Sprintf("Handcount chart labels set to: %v", clientUI.handCountChart.Labels))
+}
+
+// **DOES NOT LOCK** uiActionMutex
+func (clientUI *ClientUI) updatePlayerHandWidget() {
+	var sb strings.Builder
+	for _, card := range clientUI.playerHand {
+		sb.WriteString(fmt.Sprintf("(%s|%s) ", card.Color.String(), card.Number.String()))
+	}
+	clientUI.selfHandWidget.Text = sb.String()
 }
 
 // Creates and initializes the widget structs. All updates to the UI happens via modifying data in these
 // structs. So even if we don't have a ui goro running, these structs can be modified anyway - no need to
 // check first if ui is disabled or not
 func (clientUI *ClientUI) initWidgetObjects() {
-	clientUI.pileCell = widgets.NewParagraph()
-	clientUI.pileCell.Title = "Table"
+	clientUI.pileList = widgets.NewList()
+	clientUI.pileList.Title = "Discard Pile"
+	clientUI.pileList.Border = true
+	clientUI.pileList.TitleStyle = ui.NewStyle(ui.ColorYellow)
+	clientUI.pileList.TextStyle = ui.NewStyle(ui.ColorYellow)
+	clientUI.pileList.Rows = make([]string, 0, 64)
 
 	clientUI.handCountChart = widgets.NewBarChart()
 	clientUI.handCountChart.Labels = make([]string, 0, 16)
@@ -194,6 +243,7 @@ func (clientUI *ClientUI) initWidgetObjects() {
 	clientUI.drawDeckGauge.Percent = 100
 	clientUI.drawDeckGauge.BarColor = ui.ColorWhite
 	clientUI.drawDeckGauge.Title = "DrawDeck"
+	clientUI.drawDeckGauge.Border = false
 
 	clientUI.eventLogCell = widgets.NewParagraph()
 	clientUI.eventLogCell.Title = "Event Log"
@@ -204,39 +254,90 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 	clientUI.commandHistoryIndex = -1
 	clientUI.commandHistory = make([]string, 0, 64)
+
+	clientUI.selfHandWidget = widgets.NewParagraph()
+	clientUI.selfHandWidget.Title = "Hand"
+
+	clientUI.discardPile = uknow.NewEmptyDeck()
+	clientUI.playerHand = uknow.NewEmptyDeck()
+
+	clientUI.discardPileCells = make([]interface{}, 0, numCardsToShowInPile)
+	for i := 0; i < numCardsToShowInPile; i++ {
+		p := widgets.NewParagraph()
+		p.Text = "EMPTY PILE CELL"
+		p.Title = "PileCell"
+		p.TextStyle.Bg = ui.ColorRed
+		clientUI.discardPileCells = append(clientUI.discardPileCells, p)
+	}
+}
+
+func uiColorOfCard(color uknow.Color) ui.Color {
+	switch color {
+	case uknow.Blue:
+		return ui.ColorBlue
+	case uknow.Red:
+		return ui.ColorRed
+	case uknow.Green:
+		return ui.ColorGreen
+	case uknow.Yellow:
+		return ui.ColorYellow
+	}
+	panic(fmt.Sprintf("Unexpected Color value: %d", color))
+}
+
+func (clientUI *ClientUI) updateDiscardPileCells() {
+	low := len(clientUI.discardPile) - numCardsToShowInPile
+	if low < 0 {
+		low = 0
+	}
+
+	cardsToShow := clientUI.discardPile[low:len(clientUI.discardPile)]
+
+	for i, card := range cardsToShow {
+		p := clientUI.discardPileCells[i].(*widgets.Paragraph)
+		p.Text = card.Number.String()
+		p.TextStyle.Bg = uiColorOfCard(card.Color)
+	}
 }
 
 func (clientUI *ClientUI) Init(debugFlags DebugFlags,
 	generalUICommandChan <-chan UICommand,
 	askUserForDecisionChan <-chan *UICommandAskUserForDecision,
 	generalReplCommandPushChan chan<- *ReplCommand,
+	cardTransferEventPullChan <-chan uknow.CardTransferEvent,
 	logWindowChan <-chan string) {
 	if err := ui.Init(); err != nil {
 		log.Fatalf("Failed to initialized termui: %v", err)
 	}
 	clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
 
-	clientUI.actionCond = sync.NewCond(&clientUI.actionMutex)
+	clientUI.uiActionCond = sync.NewCond(&clientUI.uiActionMutex)
 	clientUI.action = uiRedraw
 
 	clientUI.initWidgetObjects()
 
 	clientUI.GeneralUICommandPullChan = generalUICommandChan
 	clientUI.AskUserForDecisionPullChan = askUserForDecisionChan
+	clientUI.CardTransferEventPullChan = cardTransferEventPullChan
 	clientUI.GeneralReplCommandPushChan = generalReplCommandPushChan
 
 	clientUI.grid = ui.NewGrid()
 	termWidth, termHeight := ui.TerminalDimensions()
 	clientUI.grid.SetRect(0, 0, termWidth, termHeight)
 
+	pileCellRows := make([]interface{}, 0, numCardsToShowInPile)
+	sizePerPileCell := 1.0 / numCardsToShowInPile
+	for _, pileCell := range clientUI.discardPileCells {
+		pileCellRows = append(pileCellRows, ui.NewRow(sizePerPileCell, pileCell))
+	}
+
 	clientUI.grid.Set(
-		ui.NewRow(0.05, clientUI.drawDeckGauge),
+		ui.NewRow(0.1, clientUI.drawDeckGauge),
 		ui.NewRow(0.8,
-			ui.NewCol(0.3, clientUI.pileCell),
+			ui.NewCol(0.3, pileCellRows...),
 			ui.NewCol(0.3, clientUI.handCountChart),
 			ui.NewCol(0.4, clientUI.eventLogCell)),
-		ui.NewRow(0.1,
-			ui.NewCol(1.0, clientUI.commandPromptCell)),
+		ui.NewRow(0.1, ui.NewCol(0.5, clientUI.selfHandWidget), ui.NewCol(0.5, clientUI.commandPromptCell)),
 	)
 
 	clientUI.LogWindowPullChan = logWindowChan
@@ -246,7 +347,7 @@ func (clientUI *ClientUI) Init(debugFlags DebugFlags,
 	clientUI.debugFlags = debugFlags
 }
 
-func (clientUI *ClientUI) RunGeneralUICommandConsumer() {
+func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
 	for uiCommand := range clientUI.GeneralUICommandPullChan {
 		switch cmd := uiCommand.(type) {
 		case *UICommandSetServedCards:
@@ -254,7 +355,7 @@ func (clientUI *ClientUI) RunGeneralUICommandConsumer() {
 
 			clientUI.notifyRedrawUI(uiRedraw, func() {
 				clientUI.drawDeckGauge.Percent = cmd.table.DrawDeck.Len()
-				clientUI.refillHandcountChart(cmd.table)
+				clientUI.initTableElements(cmd.table, localPlayerName)
 			})
 
 		default:
@@ -310,8 +411,10 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				}
 				clientUI.commandPromptMutex.Unlock()
 			default:
+				if !strings.HasPrefix(e.ID, "<") && !strings.HasSuffix(e.ID, ">") {
+					clientUI.appendCommandPrompt(e.ID)
+				}
 				// uknow.Logger.Printf("Event: %v\n", e)
-				clientUI.appendCommandPrompt(e.ID)
 			}
 
 		case askUserForDecisionCommand := <-clientUI.AskUserForDecisionPullChan:
@@ -350,23 +453,84 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 	}
 }
 
+func (clientUI *ClientUI) RunCardTransferEventProcessor(localPlayerName string) {
+	for event := range clientUI.CardTransferEventPullChan {
+		clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.handleCardTransferEvent(event, localPlayerName)
+		})
+	}
+}
+
+func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, playerName: %s", event.String(), localPlayerName))
+
+	switch event.Source {
+	case uknow.CardTransferNodeDeck:
+		clientUI.drawDeckGauge.Percent -= 1
+	case uknow.CardTransferNodePile:
+		var err error
+		clientUI.discardPile, err = clientUI.discardPile.Pop()
+		if err != nil {
+			clientUI.appendEventLogNoLock("handleCardTransferEvent failed: Transfer from empty pile")
+			return
+		}
+
+	case uknow.CardTransferNodePlayerHand:
+		clientUI.addToHandCountChart(event.SourcePlayer, -1)
+		if localPlayerName == event.SourcePlayer {
+			var err error
+			clientUI.playerHand, err = clientUI.playerHand.FindAndRemoveCard(event.Card)
+			if err != nil {
+				clientUI.appendEventLog(fmt.Sprintf("handleCardTransferEvent failed: %s", err))
+			}
+		}
+	}
+
+	<-time.After(500 * time.Millisecond)
+
+	switch event.Sink {
+	case uknow.CardTransferNodeDeck:
+		clientUI.drawDeckGauge.Percent += 1
+	case uknow.CardTransferNodePile:
+		clientUI.discardPile = clientUI.discardPile.Push(event.Card)
+	case uknow.CardTransferNodePlayerHand:
+		clientUI.addToHandCountChart(event.SinkPlayer, 1)
+		if localPlayerName == event.SinkPlayer {
+			clientUI.playerHand = clientUI.playerHand.Push(event.Card)
+			sort.Sort(clientUI.playerHand)
+			clientUI.updatePlayerHandWidget()
+		}
+	}
+}
+
+func (clientUI *ClientUI) addToHandCountChart(playerName string, cardCount int) {
+	chart := clientUI.handCountChart
+	for i, chartPlayerName := range chart.Labels {
+		if chartPlayerName == playerName {
+			chart.Data[i] += float64(cardCount)
+			return
+		}
+	}
+	clientUI.appendEventLogNoLock(fmt.Sprintf("addToHandCountChart failed: did not find playerName %s", playerName))
+}
+
 // Runs in own thread.
 func (clientUI *ClientUI) RunDrawLoop() {
 	ui.Render(clientUI.grid)
 	for i := 0; ; i++ {
-		clientUI.actionCond.L.Lock()
+		clientUI.uiActionCond.L.Lock()
 		for clientUI.action == uiDrawn {
-			clientUI.actionCond.Wait()
+			clientUI.uiActionCond.Wait()
 		}
 
 		if clientUI.action == uiStop {
-			clientUI.actionCond.L.Unlock()
+			clientUI.uiActionCond.L.Unlock()
 			return
 		}
 
 		switch clientUI.action {
 		case uiStop:
-			clientUI.actionCond.L.Unlock()
+			clientUI.uiActionCond.L.Unlock()
 			return
 		case uiClearRedraw:
 			ui.Clear()
@@ -379,7 +543,7 @@ func (clientUI *ClientUI) RunDrawLoop() {
 		default:
 			uknow.Logger.Fatalf("Invalid action value\n")
 		}
-		clientUI.actionCond.L.Unlock()
+		clientUI.uiActionCond.L.Unlock()
 	}
 }
 

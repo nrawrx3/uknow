@@ -135,3 +135,6 @@ When the PlayerClient asks the user for decision, all eligible commands are logg
 1. Send UICommandAskUserForDecision to ClientUI on the askUserForDecisionChan.
 2. TODO(@rk): Compute the set of eligible repl commands that the user can make first.
 3. When the user inputs a repl command, *the table object will be used to run a goro that executes the command as well as send command transfer events on a channel that the clientUI will send to it.*
+
+
+UI should have cards shown as colored. The Discard Pile and the Player Hand in particular could be grids themselves.

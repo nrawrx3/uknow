@@ -492,7 +492,7 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 }
 
 func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEvent) {
-	// FILTHY(@rk): Just spawning this goroutine to consume the card transfer events. The admin does not have a UI, so we could is simply log it. Have to think.
+	// FILTHY(@rk): Just spawning this goroutine to consume the card transfer events. The admin does not have a UI, so we could simply log it. Have to think.
 	transferEventsChan := make(chan uknow.CardTransferEvent)
 	go func() {
 		for transferEvent := range transferEventsChan {
@@ -516,7 +516,9 @@ func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEv
 		return
 	}
 
+	admin.stateMutex.Lock()
 	admin.state = DoneSyncingPlayerDecision
+	admin.stateMutex.Unlock()
 }
 
 // Call this to broadcast the event too all players. We can essentially send any []byte, but we make a decision to use this to only send event messages.

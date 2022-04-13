@@ -15,6 +15,7 @@ type CardTransferEvent struct {
 	Sink         CardTransferNode
 	SourcePlayer string // If applicable
 	SinkPlayer   string // If applicable
+	Card         Card
 }
 
 func (c *CardTransferEvent) String() string {

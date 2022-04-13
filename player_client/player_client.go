@@ -79,6 +79,7 @@ type ClientChannels struct {
 	AskUserForDecisionPushChan     chan<- *UICommandAskUserForDecision
 	NonDecisionReplCommandPullChan <-chan *ReplCommand
 	LogWindowPushChan              chan<- string
+	CardTransferEventPushChan      chan<- uknow.CardTransferEvent
 }
 type PlayerClient struct {
 	// Used to protect the non-gui state
@@ -229,6 +230,11 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 			c.Logger.Printf("Received showhand command from UI...")
 			// Just printing to event log window
 			c.logToWindow(c.table.HandOfPlayer[c.table.LocalPlayerName].String())
+
+		case CmdTableInfo:
+			c.logToWindow("--- table_info:")
+			c.logToWindow(fmt.Sprintf(`client_state: %s`, c.clientState))
+			c.logToWindow("---")
 
 		default:
 			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
@@ -426,9 +432,10 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	} else {
 		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
 		// TODO(@rk): Move to "waiting for player decision sync message from admin"
+		c.clientState = WaitingForDecisionSync
+		return
 	}
 
-	// TODO(@rk): next state
 	c.clientState = AskingUserForDecision
 	go c.askAndRunUserDecisions()
 }
@@ -457,7 +464,7 @@ func (c *PlayerClient) askAndRunUserDecisions() {
 	decisions := make([]uknow.PlayerDecision, 0, 4)
 
 	for replCommand := range receiveReplCommandsChan {
-		decision, err := c.EvalReplCommandOnTable(replCommand)
+		decision, err := c.evalReplCommandOnTable(replCommand)
 
 		if err != nil {
 			c.Logger.Print(err)
@@ -533,32 +540,33 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 		return
 	}
 
-	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, DummyCardTransferEventConsumerChan)
+	// Eval decisions of other player
+	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, c.CardTransferEventPushChan)
 
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
-func (c *PlayerClient) EvalReplCommandOnTable(replCommand *ReplCommand) (uknow.PlayerDecision, error) {
+func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.PlayerDecision, error) {
 	switch replCommand.Kind {
 	case CmdDropCard:
 		decisionEvent := uknow.PlayerDecision{
 			Kind:       uknow.PlayerDecisionPlayHandCard,
 			ResultCard: replCommand.Cards[0],
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
 
 	case CmdDrawCard:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
 
 	case CmdDrawCardFromPile:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, DummyCardTransferEventConsumerChan), nil
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
 
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())
