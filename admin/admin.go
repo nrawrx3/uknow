@@ -23,6 +23,27 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var (
+	envConfig EnvConfig
+
+	errorWaitingForAcks         = errors.New("waiting for acks")
+	errorInvalidAdminState      = errors.New("invalid admin state")
+	errorUnknownPlayer          = errors.New("unknown player")
+	errorHttpResponseFromClient = errors.New("error http response from client")
+)
+
+type AdminState string
+
+const (
+	AddingPlayers             AdminState = "adding_players"
+	ReadyToServeCards         AdminState = "ready_to_serve_cards"
+	CardsServed               AdminState = "cards_served"
+	PlayerChosenForTurn       AdminState = "player_chosen"
+	WaitingForPlayerDecision  AdminState = "waiting_for_player_decision"
+	SyncingPlayerDecision     AdminState = "syncing_player_decision"
+	DoneSyncingPlayerDecision AdminState = "done_syncing_player_decision"
+)
+
 func playerWithAddress(addr utils.TCPAddress, listenAddrOfPlayer map[string]utils.TCPAddress) (string, error) {
 	for playerName, valAddr := range listenAddrOfPlayer {
 		if valAddr.Host == addr.Host {
@@ -99,19 +120,7 @@ func makeAckIdConnectedPlayer(ackerPlayer, connectedPlayer string) string {
 	return fmt.Sprintf("%s_connected_to_%s", ackerPlayer, connectedPlayer)
 }
 
-type AdminState string
-
-const (
-	AddingPlayers             AdminState = "adding_players"
-	ReadyToServeCards         AdminState = "ready_to_serve_cards"
-	CardsServed               AdminState = "cards_served"
-	PlayerChosenForTurn       AdminState = "player_chosen"
-	WaitingForPlayerDecision  AdminState = "waiting_for_player_decision"
-	SyncingPlayerDecision     AdminState = "syncing_player_decision"
-	DoneSyncingPlayerDecision AdminState = "done_syncing_player_decision"
-)
-
-const countdownBeforeChoosingPlayer = 2 * time.Second
+const pauseBeforeChoosingPlayer = 2 * time.Second
 
 type Admin struct {
 	table      *uknow.Table
@@ -135,16 +144,16 @@ type ConfigNewAdmin struct {
 	SetReadyPlayer string
 }
 
-const logFilePrefix = "uknow_admin"
+const logFilePrefix = "admin"
 
 func NewAdmin(config *ConfigNewAdmin) *Admin {
 	admin := &Admin{
-		table:              uknow.NewAdminTable(),
+		table:              config.Table,
 		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
 		shuffler:           "",
 		state:              AddingPlayers,
 		expectedAcksState:  newExpectedAcksState(),
-		logger:             utils.CreateFileLogger(false, logFilePrefix),
+		logger:             uknow.CreateFileLogger(false, logFilePrefix),
 		setReadyPlayer:     config.SetReadyPlayer,
 	}
 
@@ -179,9 +188,9 @@ func (a *Admin) Restart() {
 	a.stateMutex.Lock()
 	defer a.stateMutex.Unlock()
 
-	a.table = uknow.NewAdminTable()
+	a.table = uknow.NewAdminTable(a.table.Logger)
 
-	a.logger = utils.CreateFileLogger(false, logFilePrefix)
+	a.logger = uknow.CreateFileLogger(false, logFilePrefix)
 
 	a.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
 	a.shuffler = ""
@@ -202,15 +211,9 @@ func (admin *Admin) RunServer() {
 
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 
-var errorWaitingForAcks = errors.New("waiting for acks")
-var errorInvalidAdminState = errors.New("invalid admin state")
-var errorUnknownPlayer = errors.New("unknown player")
-var errorHttpResponseFromClient = errors.New("error http response from client")
-
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
 func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
-	log.Print("addNewPlayer...")
 	admin.logger.Printf("addNewPlayer receeived from %s", r.URL.Host)
 
 	admin.stateMutex.Lock()
@@ -504,10 +507,13 @@ func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEv
 		PlayerDecisionsEvent: event,
 	}
 
+	// Evaluate the decisions on the admin table
 	admin.stateMutex.Lock()
 	admin.table.EvalPlayerDecisions(syncEvent.PlayerName, syncEvent.Decisions, transferEventsChan)
 	admin.state = SyncingPlayerDecision
 	admin.stateMutex.Unlock()
+
+	// TODO(@rk): Here we need to check table state and see if any player has won the game.
 
 	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
 	if err != nil {
@@ -519,6 +525,32 @@ func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEv
 	admin.stateMutex.Lock()
 	admin.state = DoneSyncingPlayerDecision
 	admin.stateMutex.Unlock()
+
+	go admin.runNewTurn()
+}
+
+func (admin *Admin) runNewTurn() {
+	if envConfig.DebugNewTurnViaPrompt {
+		log.Printf("Waiting for `newturn` command before starting turn")
+		return
+	}
+
+	<-time.After(time.Duration(envConfig.PauseMsecsBeforeNewTurn) * time.Millisecond)
+
+	log.Printf("Starting new turn...")
+	admin.startNewTurn()
+}
+
+func (admin *Admin) startNewTurn() {
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
+
+	if admin.state != DoneSyncingPlayerDecision {
+		admin.logger.Fatalf("startNewTurn: Unexpected state: %s", admin.state)
+	}
+
+	admin.state = PlayerChosenForTurn
+	go admin.sendChosenPlayerEventToAllPlayers()
 }
 
 // Call this to broadcast the event too all players. We can essentially send any []byte, but we make a decision to use this to only send event messages.
@@ -584,14 +616,15 @@ func (admin *Admin) sendServeCardsEventToAllPlayers() {
 	admin.logger.Printf("sendServeCardsEventToAllPlayers success")
 
 	admin.state = CardsServed
-
 	go admin.sendChosenPlayerEventToAllPlayers()
 }
 
 func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
-	admin.logger.Printf("Waiting %.0f seconds before sending chosen player event", countdownBeforeChoosingPlayer.Seconds())
+	admin.logger.Printf("Waiting %.0f seconds before sending chosen player event", pauseBeforeChoosingPlayer.Seconds())
 
-	<-time.After(countdownBeforeChoosingPlayer)
+	<-time.After(pauseBeforeChoosingPlayer)
+
+	admin.logger.Printf("Next turn: %s", admin.table.NextPlayerToDraw)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
@@ -626,13 +659,6 @@ func (admin *Admin) setReady() {
 	}
 
 	admin.expectedAcksState.mu.Unlock()
-}
-
-type EnvConfig struct {
-	ListenAddr     string `split_words:"true" required:"true"`
-	ListenPort     int    `split_words:"true" required:"true"`
-	RunREPL        bool   `split_words:"true" required:"false" default:"true"`
-	SetReadyPlayer string `split_words:"true" required:"true"`
 }
 
 func (admin *Admin) RunREPL() {
@@ -683,7 +709,6 @@ func (admin *Admin) RunREPL() {
 }
 
 func RunApp() {
-	var envConfig EnvConfig
 	var adminConfigFile string
 	flag.StringVar(&adminConfigFile, "conf", ".env", "Dotenv config file for admin server")
 
@@ -705,7 +730,8 @@ func RunApp() {
 
 	config := &ConfigNewAdmin{}
 	config.ListenAddr = utils.TCPAddress{Host: envConfig.ListenAddr, Port: envConfig.ListenPort}
-	config.Table = uknow.NewAdminTable()
+
+	config.Table = uknow.NewAdminTable(uknow.CreateFileLogger(false, "table_admin"))
 	config.SetReadyPlayer = envConfig.SetReadyPlayer
 
 	admin := NewAdmin(config)

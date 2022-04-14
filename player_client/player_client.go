@@ -91,9 +91,13 @@ type PlayerClient struct {
 	// Server used to service requests made by admin and other players
 	httpServer *http.Server
 
-	// NOTE(@rk): We are NOT storing connections to any of the other players in a PlayerClient. We let http.Transport do that for us. We simply keep a map of player name to player address.
-	// When the admin sends an AddNewPlayer message via POST /players to a PlayerClient, the client makes a GET /ping on the new player's address to confirm that it can connect. This also
-	// creates a connection to this client in http.Transport used by the PlayerClient.
+	// NOTE(@rk): We are NOT storing connections to any of the other players
+	// in a PlayerClient. We let http.Transport do that for us using its own
+	// internal connection pool. We simply keep a map of player name to
+	// player address. When the admin sends an AddNewPlayer message via POST
+	// /players to a PlayerClient, the client makes a GET /ping on the new
+	// player's address to confirm that it can connect. This also creates a
+	// connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
 	neighborListenAddr ClusterMap
 	adminAddr          utils.TCPAddress
@@ -124,7 +128,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 		httpClient:         utils.CreateHTTPClient(),
 		neighborListenAddr: make(ClusterMap),
 		ClientChannels:     config.ClientChannels,
-		Logger:             utils.CreateFileLogger(false, config.Table.LocalPlayerName),
+		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		debugFlags:         debugFlags,
 		adminAddr:          config.DefaultAdminAddr,
 	}
@@ -445,7 +449,7 @@ func (c *PlayerClient) askAndRunUserDecisions() {
 	defer c.stateMutex.Unlock()
 
 	c.logToWindow("Asking for user decision")
-	c.logToWindow(c.table.Summary())
+	// c.logToWindow(c.table.Summary())
 
 	receiveReplCommandsChan := make(chan *ReplCommand)
 	allowOneMoreDecision := make(chan bool)

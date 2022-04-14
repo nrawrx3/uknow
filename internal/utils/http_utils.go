@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -46,21 +44,6 @@ func (t *TCPAddress) String() string {
 
 func (t *TCPAddress) BindString() string {
 	return fmt.Sprintf("%s:%d", t.Host, t.Port)
-}
-
-func CreateFileLogger(setAsDefault bool, playerName string) *log.Logger {
-	fileName := fmt.Sprintf("/tmp/%s_log.txt", playerName)
-	f, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-	if err != nil {
-		log.Fatalf("Failed to open/create log file: %s", fileName)
-	}
-
-	if setAsDefault {
-		log.SetOutput(f)
-		return log.Default()
-	} else {
-		return log.New(f, playerName, log.Ltime|log.Lshortfile)
-	}
 }
 
 func ConcatHostPort(protocol string, host string, port int) string {
