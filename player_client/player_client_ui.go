@@ -29,6 +29,8 @@ const (
 	ClientUIAllowPlayerDecisionReplCommands ClientUIState = "allow_player_decision_repl_commands"
 )
 
+const maxLinesInEventLog = 50
+
 type ClientUIChannels struct {
 	GeneralUICommandPullChan   <-chan UICommand                    // For one-off commands and events
 	AskUserForDecisionPullChan <-chan *UICommandAskUserForDecision // Tells the UI component that it should expect decision commands from player
@@ -54,7 +56,6 @@ type ClientUI struct {
 	action            uiAction
 	grid              *ui.Grid
 	pileList          *widgets.List
-	eventLogCell      *widgets.Paragraph
 	commandPromptCell *widgets.Paragraph
 	drawDeckGauge     *widgets.Gauge
 	handCountChart    *widgets.BarChart
@@ -62,6 +63,8 @@ type ClientUI struct {
 	discardPile       uknow.Deck    // Not a widget itself, but the pileCell gets its data from here
 	playerHand        uknow.Deck    // Not widget itself, but the playerHandCell gets its data from here
 	discardPileCells  []interface{} // Stores *widgets.Paragraph(s)
+	eventLogCell      *widgets.Paragraph
+	eventLogLines     []string
 
 	commandPromptMutex      sync.Mutex
 	commandStringBeingTyped string
@@ -72,6 +75,8 @@ type ClientUI struct {
 
 	// Used for internal comm when the we receive a UICommandAskUserForDecision ui command
 	decisionReplCommandConsumerChan chan *ReplCommand
+
+	Logger *log.Logger
 
 	debugFlags DebugFlags
 }
@@ -105,28 +110,46 @@ func (clientUI *ClientUI) handleCommandInput(playerName string) {
 			clientUI.appendEventLog("User decision commands not allowed currently!")
 			return
 		}
-		uknow.Logger.Printf("Before sending command to clientUI.decisionReplCommandConsumerChan")
-		defer uknow.Logger.Printf("Done sending command to clientUI.decisionReplCommandConsumerChan")
+		clientUI.Logger.Printf("Before sending command to clientUI.decisionReplCommandConsumerChan")
+		defer clientUI.Logger.Printf("Done sending command to clientUI.decisionReplCommandConsumerChan")
 		clientUI.decisionReplCommandConsumerChan <- command
 	} else {
-		uknow.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
+		clientUI.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
 		clientUI.GeneralReplCommandPushChan <- command
 
-		uknow.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
+		clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
 	}
 
 	clientUI.resetCommandPrompt("", true)
 }
 
-func (clientUI *ClientUI) appendEventLog(line string) {
+func (clientUI *ClientUI) appendEventLog(s string) {
 	clientUI.notifyRedrawUI(uiRedraw, func() {
-		clientUI.eventLogCell.Text = fmt.Sprintf("%s\n%s", clientUI.eventLogCell.Text, line)
-		// uknow.Logger.Println(line)
+		clientUI.appendEventLogNoLock(s)
 	})
 }
 
-func (clientUI *ClientUI) appendEventLogNoLock(line string) {
-	clientUI.eventLogCell.Text = fmt.Sprintf("%s\n%s", clientUI.eventLogCell.Text, line)
+func (clientUI *ClientUI) appendEventLogNoLock(s string) {
+	clientUI.eventLogLines = append(clientUI.eventLogLines, strings.Split(s, "\n")...)
+
+	var sb strings.Builder
+
+	low := len(clientUI.eventLogLines) - maxLinesInEventLog
+	if low < 0 {
+		low = 0
+	}
+
+	for i := len(clientUI.eventLogLines) - 1; i >= low; i-- {
+		sb.WriteString(clientUI.eventLogLines[i])
+		sb.WriteRune('\n')
+	}
+
+	clientUI.eventLogCell.Text = sb.String()
+
+	l := len(clientUI.eventLogLines)
+	if l > maxLinesInEventLog {
+		clientUI.eventLogLines = clientUI.eventLogLines[l-maxLinesInEventLog : l]
+	}
 }
 
 func (clientUI *ClientUI) appendCommandPrompt(s string) {
@@ -247,6 +270,7 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 	clientUI.eventLogCell = widgets.NewParagraph()
 	clientUI.eventLogCell.Title = "Event Log"
+	clientUI.eventLogLines = make([]string, 0, 5120)
 
 	clientUI.commandPromptCell = widgets.NewParagraph()
 	clientUI.commandPromptCell.Title = "Command Input"
@@ -301,6 +325,7 @@ func (clientUI *ClientUI) updateDiscardPileCells() {
 }
 
 func (clientUI *ClientUI) Init(debugFlags DebugFlags,
+	logger *log.Logger,
 	generalUICommandChan <-chan UICommand,
 	askUserForDecisionChan <-chan *UICommandAskUserForDecision,
 	generalReplCommandPushChan chan<- *ReplCommand,
@@ -309,6 +334,7 @@ func (clientUI *ClientUI) Init(debugFlags DebugFlags,
 	if err := ui.Init(); err != nil {
 		log.Fatalf("Failed to initialized termui: %v", err)
 	}
+	clientUI.Logger = logger
 	clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
 
 	clientUI.uiActionCond = sync.NewCond(&clientUI.uiActionMutex)
@@ -367,7 +393,7 @@ func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
 // Runs in own thread
 func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 	defer func() {
-		uknow.Logger.Printf("Event loop exits\n")
+		clientUI.Logger.Printf("Event loop exits\n")
 	}()
 
 	uiEvents := ui.PollEvents()
@@ -414,7 +440,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				if !strings.HasPrefix(e.ID, "<") && !strings.HasSuffix(e.ID, ">") {
 					clientUI.appendCommandPrompt(e.ID)
 				}
-				// uknow.Logger.Printf("Event: %v\n", e)
+				// clientUI.Logger.Printf("Event: %v\n", e)
 			}
 
 		case askUserForDecisionCommand := <-clientUI.AskUserForDecisionPullChan:
@@ -537,11 +563,11 @@ func (clientUI *ClientUI) RunDrawLoop() {
 			ui.Render(clientUI.grid)
 			clientUI.action = uiDrawn
 		case uiRedraw:
-			// uknow.Logger.Printf("Redrawing UI")
+			// clientUI.Logger.Printf("Redrawing UI")
 			ui.Render(clientUI.grid)
 			clientUI.action = uiDrawn
 		default:
-			uknow.Logger.Fatalf("Invalid action value\n")
+			clientUI.Logger.Fatalf("Invalid action value\n")
 		}
 		clientUI.uiActionCond.L.Unlock()
 	}

@@ -4,22 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"runtime"
 	"sort"
 	"strings"
 )
-
-var Logger = log.Default()
-
-func LogInfo(format string, args ...interface{}) {
-	pc := make([]uintptr, 15)
-	n := runtime.Callers(2, pc)
-	frames := runtime.CallersFrames(pc[:n])
-	frame, _ := frames.Next()
-
-	format = fmt.Sprintf("%s:%d:%s> ", frame.File, frame.Line, frame.Function) + format
-	Logger.Printf(format, args...)
-}
 
 var ErrorCouldNotFindCard = "could not find card in given deck"
 
@@ -245,10 +232,11 @@ type Table struct {
 	ShufflerName     string          `json:"shuffler_name"`
 	NextPlayerToDraw string          `json:"next_player_to_draw"`
 	Direction        int             `json:"direction"`
+	Logger           *log.Logger
 }
 
-func NewTable(localPlayerName string) *Table {
-	table := createNewTable()
+func NewTable(localPlayerName string, logger *log.Logger) *Table {
+	table := createNewTable(logger)
 	table.LocalPlayerName = localPlayerName
 	table.AddPlayer(localPlayerName)
 	return table
@@ -268,8 +256,8 @@ func (t *Table) Set(other *Table) {
 	t.Direction = other.Direction
 }
 
-func NewAdminTable() *Table {
-	return createNewTable()
+func NewAdminTable(logger *log.Logger) *Table {
+	return createNewTable(logger)
 }
 
 func (t *Table) Summary() string {
@@ -288,7 +276,7 @@ func (t *Table) Summary() string {
 	return sb.String()
 }
 
-func createNewTable() *Table {
+func createNewTable(logger *log.Logger) *Table {
 	return &Table{
 		DrawDeck:      NewFullDeck(),
 		Pile:          NewEmptyDeck(),
@@ -296,6 +284,7 @@ func createNewTable() *Table {
 		IndexOfPlayer: make(map[string]int),
 		PlayerNames:   make([]string, 0, 16),
 		Direction:     1,
+		Logger:        logger,
 	}
 }
 
@@ -395,7 +384,7 @@ func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
 	t.DrawDeck.Pop()
 	t.Pile.Push(topCard)
 
-	log.Printf("Top card: %+v", topCard)
+	t.Logger.Printf("Top card: %+v", topCard)
 
 	if topCard.Number == CardReverse {
 		t.Direction = -t.Direction
@@ -444,7 +433,9 @@ func (t *Table) EvalPlayerDecisions(playerName string, decisions []PlayerDecisio
 	}
 }
 
-// TODO(@rk): Incomplete. Takes a decision event, "evaluates" the bare minimum, i.e. update deck/pile/hand of the decision player and pushes the event to the transferEventChan. We need to do the whole "game logic" in this function.
+// TODO(@rk): Incomplete. Takes a decision event, "evaluates" the bare minimum,
+// i.e. update deck/pile/hand of the decision player and pushes the event to the
+// transferEventChan. We need to do the whole "game logic" in this function.
 func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) PlayerDecision {
 	handOfPlayer := t.HandOfPlayer[playerName]
 
@@ -482,6 +473,10 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 	case PlayerDecisionPlayHandCard:
 		t.PlayCard(playerName, decision.ResultCard, transferEventsChan)
 	}
+
+	// TODO(@rk): This also depends on the logic. Simply moving to next player
+	playerIndex := t.PlayerIndexFromName(playerName)
+	t.NextPlayerToDraw = t.PlayerNames[t.GetNextPlayerIndex(playerIndex, t.Direction)]
 
 	return decision
 }

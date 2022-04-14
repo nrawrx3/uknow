@@ -2,8 +2,25 @@ package uknow
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
+	"os"
 )
+
+func CreateFileLogger(setAsDefault bool, playerName string) *log.Logger {
+	fileName := fmt.Sprintf("/tmp/%s_log.txt", playerName)
+	f, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open/create log file: %s", fileName)
+	}
+
+	if setAsDefault {
+		log.SetOutput(f)
+		return log.Default()
+	} else {
+		return log.New(f, playerName, log.Ltime|log.Lshortfile)
+	}
+}
 
 func ShuffleIntRange(start, end int) []int {
 	if end < start {

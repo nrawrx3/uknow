@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"strings"
 
@@ -49,7 +50,9 @@ func RunApp() {
 
 	commChannels := client.MakeCommChannels()
 
-	table := uknow.NewTable(envConfig.PlayerName)
+	tableLogger := uknow.CreateFileLogger(false, fmt.Sprintf("table_%s", envConfig.PlayerName))
+
+	table := uknow.NewTable(envConfig.PlayerName, tableLogger)
 
 	clientChannels := client.ClientChannels{
 		GeneralUICommandPushChan:       commChannels.GeneralUICommandChan,
@@ -81,16 +84,17 @@ func RunApp() {
 	go c.RunServer()
 	go c.RunGeneralCommandHandler()
 
+	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", envConfig.PlayerName))
+
 	var clientUI client.ClientUI
 	clientUI.Init(debugFlags,
+		uiLogger,
 		commChannels.GeneralUICommandChan,
 		commChannels.AskUIForUserTurnChan,
 		commChannels.NonDecisionReplCommandsChan,
 		commChannels.CardTransferEventChan,
 		commChannels.LogWindowChan)
 	defer ui.Close()
-
-	uknow.Logger = c.Logger
 
 	go clientUI.RunPollInputEvents(envConfig.PlayerName)
 	go clientUI.RunGeneralUICommandConsumer(envConfig.PlayerName)
