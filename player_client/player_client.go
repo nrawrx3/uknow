@@ -108,8 +108,6 @@ type PlayerClient struct {
 	ClientChannels
 
 	Logger *log.Logger
-
-	debugFlags DebugFlags
 }
 
 type ConfigNewPlayerClient struct {
@@ -121,7 +119,7 @@ type ConfigNewPlayerClient struct {
 	DefaultAdminAddr utils.TCPAddress
 }
 
-func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
+func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	c := &PlayerClient{
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
@@ -129,7 +127,6 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 		neighborListenAddr: make(ClusterMap),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
-		debugFlags:         debugFlags,
 		adminAddr:          config.DefaultAdminAddr,
 	}
 

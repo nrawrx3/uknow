@@ -17,24 +17,6 @@ type EnvConfig struct {
 	DebugFlags []string `split_words:"true"`
 }
 
-type DebugFlags struct {
-	NoAdmin      bool
-	DummyUILogic bool
-}
-
-func (conf *EnvConfig) GetDebugFlags() DebugFlags {
-	var flags DebugFlags
-	for _, flg := range conf.DebugFlags {
-		switch flg {
-		case "NO_ADMIN":
-			flags.NoAdmin = true
-		default:
-			log.Fatalf("Unrecognized flag: %s", flg)
-		}
-	}
-	return flags
-}
-
 // Channels used for communication between the client components - PlayerClientUI and PlayerClient
 type CommChannels struct {
 	GeneralUICommandChan chan UICommand

@@ -39,7 +39,6 @@ func RunApp() {
 	}
 
 	envConfig.PlayerName = strings.TrimSpace(envConfig.PlayerName)
-	debugFlags := envConfig.GetDebugFlags()
 
 	if !client.IsUserNameAllowed(envConfig.PlayerName) {
 		log.Fatalf("Only names with alphabet and underscore characters allowed, name given: %s", envConfig.PlayerName)
@@ -79,7 +78,7 @@ func RunApp() {
 	// FILTHY(@rk):TODO(@rk): Delete this when done with proper implementation in ui
 	client.DummyCardTransferEventConsumerChan = make(chan uknow.CardTransferEvent)
 
-	c := client.NewPlayerClient(playerClientConfig, debugFlags)
+	c := client.NewPlayerClient(playerClientConfig)
 
 	go c.RunServer()
 	go c.RunGeneralCommandHandler()
@@ -87,8 +86,7 @@ func RunApp() {
 	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", envConfig.PlayerName))
 
 	var clientUI client.ClientUI
-	clientUI.Init(debugFlags,
-		uiLogger,
+	clientUI.Init(uiLogger,
 		commChannels.GeneralUICommandChan,
 		commChannels.AskUIForUserTurnChan,
 		commChannels.NonDecisionReplCommandsChan,

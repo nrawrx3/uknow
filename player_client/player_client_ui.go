@@ -77,8 +77,6 @@ type ClientUI struct {
 	decisionReplCommandConsumerChan chan *ReplCommand
 
 	Logger *log.Logger
-
-	debugFlags DebugFlags
 }
 
 func (clientUI *ClientUI) notifyRedrawUI(action uiAction, exec func()) {
@@ -324,8 +322,7 @@ func (clientUI *ClientUI) updateDiscardPileCells() {
 	}
 }
 
-func (clientUI *ClientUI) Init(debugFlags DebugFlags,
-	logger *log.Logger,
+func (clientUI *ClientUI) Init(logger *log.Logger,
 	generalUICommandChan <-chan UICommand,
 	askUserForDecisionChan <-chan *UICommandAskUserForDecision,
 	generalReplCommandPushChan chan<- *ReplCommand,
@@ -369,8 +366,6 @@ func (clientUI *ClientUI) Init(debugFlags DebugFlags,
 	clientUI.LogWindowPullChan = logWindowChan
 
 	clientUI.decisionReplCommandConsumerChan = make(chan *ReplCommand)
-
-	clientUI.debugFlags = debugFlags
 }
 
 func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
