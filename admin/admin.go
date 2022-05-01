@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
+	"github.com/rksht/uknow/hand_reader"
 	"github.com/rksht/uknow/internal/messages"
 	"github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
@@ -26,10 +26,9 @@ import (
 var (
 	envConfig EnvConfig
 
-	errorWaitingForAcks         = errors.New("waiting for acks")
-	errorInvalidAdminState      = errors.New("invalid admin state")
-	errorUnknownPlayer          = errors.New("unknown player")
-	errorHttpResponseFromClient = errors.New("error http response from client")
+	errorWaitingForAcks    = errors.New("waiting for acks")
+	errorInvalidAdminState = errors.New("invalid admin state")
+	errorUnknownPlayer     = errors.New("unknown player")
 )
 
 type AdminState string
@@ -53,71 +52,12 @@ func playerWithAddress(addr utils.TCPAddress, listenAddrOfPlayer map[string]util
 	return "", fmt.Errorf("%w: no player with address %s", errorUnknownPlayer, addr.BindString())
 }
 
-// A struct containing info about acks being waited on by server. Note that ackId, and sourcePlayer, must fix the expectedAck entity
-type expectedAck struct {
-	ackId           string
-	ackerPlayerName string
-	deadline        time.Time
-	afterAckFn      func()
-}
-
-func (ack *expectedAck) equal(ack1 *expectedAck) bool {
-	return ack.ackId == ack1.ackId && ack.ackerPlayerName == ack1.ackerPlayerName
-}
-
-type expectedAcksState struct {
-	mu               sync.Mutex
-	list             []*expectedAck
-	chNewAckReceived chan *expectedAck
-}
-
-func newExpectedAcksState() *expectedAcksState {
-	return &expectedAcksState{
-		list:             make([]*expectedAck, 0, 16),
-		chNewAckReceived: make(chan *expectedAck),
-	}
-}
-
-func (es *expectedAcksState) addAck(ack *expectedAck) {
-	es.mu.Lock()
-	log.Printf("Adding new expecting ack to list %+v", ack)
-	es.list = append(es.list, ack)
-	es.mu.Unlock()
-}
-
-func (es *expectedAcksState) ackIds() string {
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	var sb strings.Builder
-	for _, ack := range es.list {
-		sb.WriteString(ack.ackId)
-		sb.WriteByte('\n')
-	}
-	return sb.String()
-}
-
-func (es *expectedAcksState) runLoop() {
-	for expectedAck := range es.chNewAckReceived {
-		es.mu.Lock()
-
-		for i, ack := range es.list {
-			if !ack.equal(expectedAck) {
-				continue
-			}
-
-			log.Printf("Acking the ack: %s", ack.ackId)
-
-			ack.afterAckFn()
-			es.list = append(es.list[0:i], es.list[i+1:len(es.list)]...)
-			break
-		}
-
-		es.mu.Unlock()
-	}
-}
-
 func makeAckIdConnectedPlayer(ackerPlayer, connectedPlayer string) string {
 	return fmt.Sprintf("%s_connected_to_%s", ackerPlayer, connectedPlayer)
+}
+
+func makeAckIdWaitingForPlayerDecision(ackerPlayer string, decisionCounter int) string {
+	return fmt.Sprintf("waiting_for_decision.%s.%d", ackerPlayer, decisionCounter)
 }
 
 const pauseBeforeChoosingPlayer = 2 * time.Second
@@ -128,14 +68,15 @@ type Admin struct {
 	state      AdminState
 
 	// Address of player registered on connect command
-	listenAddrOfPlayer map[string]utils.TCPAddress
-	shuffler           string
-	setReadyPlayer     string
-	httpClient         *http.Client
-	httpServer         *http.Server
-	logger             *log.Logger
+	listenAddrOfPlayer      map[string]utils.TCPAddress
+	shuffler                string
+	setReadyPlayer          string
+	httpClient              *http.Client
+	httpServer              *http.Server
+	logger                  *log.Logger
+	decisionEventsCompleted int
 
-	expectedAcksState *expectedAcksState
+	expectedAcksList *expectedAcksList
 }
 
 type ConfigNewAdmin struct {
@@ -152,7 +93,7 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
 		shuffler:           "",
 		state:              AddingPlayers,
-		expectedAcksState:  newExpectedAcksState(),
+		expectedAcksList:   newExpectedAcksState(),
 		logger:             uknow.CreateFileLogger(false, logFilePrefix),
 		setReadyPlayer:     config.SetReadyPlayer,
 	}
@@ -195,14 +136,14 @@ func (a *Admin) Restart() {
 	a.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
 	a.shuffler = ""
 	a.state = AddingPlayers
-	a.expectedAcksState = newExpectedAcksState()
+	a.expectedAcksList = newExpectedAcksState()
 
 	log.Print("Admin restarted...")
 }
 
 func (admin *Admin) RunServer() {
 	admin.logger.Printf("Running admin server at addr: %s", admin.httpServer.Addr)
-	go admin.expectedAcksState.runLoop()
+	go admin.expectedAcksList.waitForAcks()
 	err := admin.httpServer.ListenAndServe()
 	if err != nil {
 		log.Fatalf("Admin.RunServer() failed: %s", err.Error())
@@ -246,18 +187,28 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	// Tell existing players about the new player
 	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerListenAddr.Host, newPlayerListenAddr.Port)
 
-	// Add the player to the local table
-	err = admin.table.AddPlayer(newPlayerName)
-	if errors.Is(err, uknow.PlayerAlreadyExists) {
-		w.WriteHeader(http.StatusOK)
-		admin.logger.Printf("player %s already exists", newPlayerName)
-		return
-	}
+	// Add the player to the local table. **But don't if it's already added
+	// by hand-reader - in which case check that we have this player in the
+	// table module.**
+	if admin.table.IsShuffled {
+		_, ok := admin.table.HandOfPlayer[newPlayerName]
+		if !ok {
+			admin.logger.Printf("player %s has not been loaded by hand-reader. see the JSON config.", newPlayerName)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		}
+	} else {
+		err = admin.table.AddPlayer(newPlayerName)
+		if errors.Is(err, uknow.ErrPlayerAlreadyExists) {
+			w.WriteHeader(http.StatusOK)
+			admin.logger.Printf("player %s already exists", newPlayerName)
+			return
+		}
 
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		admin.logger.Printf("Cannot add new player: %s", err)
-		return
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			admin.logger.Printf("Cannot add new player: %s", err)
+			return
+		}
 	}
 
 	// Add the player's listen address
@@ -286,13 +237,9 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		respAddNewPlayersMessage.Add(playerName, addr.Host, addr.Port, "http")
 
 		// Also add an expecting-ack that admin should receive from the new player for connecting to each of the existing players.
-		admin.expectedAcksState.addAck(&expectedAck{
-			ackerPlayerName: newPlayerName,
-			ackId:           makeAckIdConnectedPlayer(newPlayerName, playerName),
-			deadline:        time.Now().Add(10 * time.Second),
-			afterAckFn: func() {
-				admin.logger.Printf("ack received: %s (new player) connected to %s (existing)", newPlayerName, playerName)
-			},
+
+		admin.expectedAcksList.addPending(expectedAck{ackerPlayerName: newPlayerName, ackId: makeAckIdConnectedPlayer(newPlayerName, playerName)}, 10*time.Second, func() {}, func() {
+			admin.logger.Printf("Ack timeout: new player %s could not connect to existing player %s in time", newPlayerName, playerName)
 		})
 	}
 
@@ -319,7 +266,7 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 
 		g.Go(func() error {
 			url := playerListenAddr.HTTPAddress() + "/players"
-			admin.logger.Printf("Telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.String(), newPlayerName, url)
+			admin.logger.Printf("telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.String(), newPlayerName, url)
 
 			requestSender := utils.RequestSender{
 				Client:     admin.httpClient,
@@ -335,18 +282,22 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				admin.logger.Printf("Response from existing player %s on /player: %s", playerName, resp.Status)
+				admin.logger.Printf("response from existing player %s on /player: %s", playerName, resp.Status)
 				return fmt.Errorf("failed to call POST /players on player %s", playerName)
 			}
 
 			// Add an expecting-ack for this existing player. The existing player will send an ack asynchronously denoting that it has established connection with the new player
-			admin.expectedAcksState.addAck(&expectedAck{
-				ackId:           makeAckIdConnectedPlayer(playerName, newPlayerName),
-				ackerPlayerName: playerName,
-				afterAckFn: func() {
-					admin.logger.Printf("ack received: existing player %s connected to new player %s", playerName, newPlayerName)
+			admin.expectedAcksList.addPending(
+				expectedAck{
+					ackId:           makeAckIdConnectedPlayer(playerName, newPlayerName),
+					ackerPlayerName: playerName,
 				},
-			})
+				5*time.Second,
+				func() {},
+				func() {
+					admin.logger.Printf("ack timeout: existing player %s could not connect to new player %s in time", playerName, newPlayerName)
+				},
+			)
 
 			admin.logger.Printf("Done telling existing player %s about new player %s at url %s, awaiting ack", playerName, newPlayerName, url)
 
@@ -376,14 +327,14 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Find and remove from this ack from the expectingAcks list. Don't forget to lock it first.
-	ack := &expectedAck{
+	ack := expectedAck{
 		ackId:           makeAckIdConnectedPlayer(reqBody.AckerPlayer, reqBody.NewPlayer),
 		ackerPlayerName: reqBody.AckerPlayer,
 	}
 
 	admin.logger.Printf("ack: %+v", ack)
 
-	admin.expectedAcksState.chNewAckReceived <- ack
+	admin.expectedAcksList.chNewAckReceived <- ack
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -425,11 +376,11 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	admin.expectedAcksState.mu.Lock()
-	numExpectingAcks := len(admin.expectedAcksState.list)
+	admin.expectedAcksList.mu.Lock()
+	numExpectingAcks := len(admin.expectedAcksList.pendingAcks)
 
 	if numExpectingAcks != 0 {
-		admin.expectedAcksState.mu.Unlock()
+		admin.expectedAcksList.mu.Unlock()
 		admin.logger.Printf("handleSetReady: cannot change to ready state, numExpectingAcks = %d (!= 0)", numExpectingAcks)
 
 		w.WriteHeader(http.StatusSeeOther)
@@ -440,7 +391,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	admin.expectedAcksState.mu.Unlock()
+	admin.expectedAcksList.mu.Unlock()
 
 	var setReadyMessage messages.SetReadyMessage
 	err = json.NewDecoder(r.Body).Decode(&setReadyMessage)
@@ -454,10 +405,13 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	// shuffle and serve cards. then sync the table state with each player.
 	admin.table.ShufflerName = setReadyMessage.ShufflerName
-	admin.table.ShuffleDeckAndDistribute(8)
+
+	if !admin.table.IsShuffled {
+		admin.table.ShuffleDeckAndDistribute(8)
+	}
 
 	if setReadyMessage.ShufflerIsFirstPlayer {
-		admin.table.NextPlayerToDraw = admin.table.ShufflerName
+		admin.table.PlayerToDraw = admin.table.ShufflerName
 	}
 
 	go admin.sendServeCardsEventToAllPlayers()
@@ -489,12 +443,23 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	admin.logger.Printf("Received decisions event from player: %s", event.PlayerName)
+	admin.logger.Printf("Received decisions event from player: %s, decisions: %+v, decisionCounter: %d", event.PlayerName, event.Decisions, event.DecisionEventCounter)
 
-	go admin.syncPlayerDecisionListEvent(event)
+	ack := expectedAck{
+		ackId:           makeAckIdWaitingForPlayerDecision(event.PlayerName, event.DecisionEventCounter),
+		ackerPlayerName: event.PlayerName,
+	}
+
+	if event.DecisionEventCounter != admin.decisionEventsCompleted {
+		admin.logger.Printf("Unexpected decision event counter in ack: %s, but admin decision counter is %d", ack.ackId, admin.decisionEventsCompleted)
+	}
+
+	admin.expectedAcksList.chNewAckReceived <- ack
+
+	go admin.syncPlayerDecisionsEvent(event)
 }
 
-func (admin *Admin) syncPlayerDecisionListEvent(event messages.PlayerDecisionsEvent) {
+func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent) {
 	// FILTHY(@rk): Just spawning this goroutine to consume the card transfer events. The admin does not have a UI, so we could simply log it. Have to think.
 	transferEventsChan := make(chan uknow.CardTransferEvent)
 	go func() {
@@ -624,12 +589,17 @@ func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
 
 	<-time.After(pauseBeforeChoosingPlayer)
 
-	admin.logger.Printf("Next turn: %s", admin.table.NextPlayerToDraw)
+	admin.logger.Printf("Next turn: %s", admin.table.PlayerToDraw)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
 
-	eventMsg := messages.ChosenPlayerEvent{PlayerName: admin.table.NextPlayerToDraw}
+	chosenPlayer := admin.table.PlayerToDraw
+
+	eventMsg := messages.ChosenPlayerEvent{
+		PlayerName:           chosenPlayer,
+		DecisionEventCounter: admin.decisionEventsCompleted,
+	}
 	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
 
 	if err != nil {
@@ -640,6 +610,19 @@ func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
 	admin.logger.Printf("sendChosenPlayerEventToAllPlayers success")
 
 	admin.state = WaitingForPlayerDecision
+
+	admin.expectedAcksList.addPending(
+		expectedAck{
+			ackId:           makeAckIdWaitingForPlayerDecision(chosenPlayer, admin.decisionEventsCompleted),
+			ackerPlayerName: chosenPlayer,
+		},
+		// 20*time.Second,
+		1*time.Hour,
+		func() {},
+		func() {
+			admin.logger.Printf("Ack timeout: Failed to receive player decision event from player %s", chosenPlayer)
+		},
+	)
 }
 
 func (admin *Admin) setReady() {
@@ -650,15 +633,15 @@ func (admin *Admin) setReady() {
 		admin.logger.Printf("Expecting admin state: %s, but have %s", AddingPlayers, admin.state)
 	}
 
-	admin.expectedAcksState.mu.Lock()
-	numExpectingAcks := len(admin.expectedAcksState.list)
+	admin.expectedAcksList.mu.Lock()
+	numExpectingAcks := len(admin.expectedAcksList.pendingAcks)
 
 	if numExpectingAcks != 0 {
-		admin.expectedAcksState.mu.Unlock()
+		admin.expectedAcksList.mu.Unlock()
 		admin.logger.Printf("handleSetReady: cannot change to ready state, numExpectingAcks = %d (!= 0)", numExpectingAcks)
 	}
 
-	admin.expectedAcksState.mu.Unlock()
+	admin.expectedAcksList.mu.Unlock()
 }
 
 func (admin *Admin) RunREPL() {
@@ -684,7 +667,7 @@ func (admin *Admin) RunREPL() {
 		}
 
 		if line == "acks" {
-			log.Printf("Expecting acks:\n%s", admin.expectedAcksState.ackIds())
+			log.Printf("Expecting acks:\n%s", admin.expectedAcksList.ackIds())
 			continue
 		}
 
@@ -706,6 +689,25 @@ func (admin *Admin) RunREPL() {
 			admin.setReady()
 		}
 	}
+}
+
+// If there's a starting hand-config specified for debugging, we create a table accordingly
+func createStartingTable(c *EnvConfig) *uknow.Table {
+	tableLogger := uknow.CreateFileLogger(false, "table_admin")
+	table := uknow.NewAdminTable(tableLogger)
+
+	if c.DebugStartingHandConfigJSON == "" {
+		return table
+	}
+
+	table, err := hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
+
+	if err != nil {
+		log.Fatalf("failed to load hand-config: %s", err)
+	} else {
+		log.Printf("loaded hand-config")
+	}
+	return table
 }
 
 func RunApp() {
@@ -731,7 +733,7 @@ func RunApp() {
 	config := &ConfigNewAdmin{}
 	config.ListenAddr = utils.TCPAddress{Host: envConfig.ListenAddr, Port: envConfig.ListenPort}
 
-	config.Table = uknow.NewAdminTable(uknow.CreateFileLogger(false, "table_admin"))
+	config.Table = createStartingTable(&envConfig)
 	config.SetReadyPlayer = envConfig.SetReadyPlayer
 
 	admin := NewAdmin(config)

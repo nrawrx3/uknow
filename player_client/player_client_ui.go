@@ -186,7 +186,10 @@ func (clientUI *ClientUI) resetCommandPrompt(text string, addCurrentTextToHistor
 	})
 }
 
-// DOES NOT LOCK actionMutex
+// DOES NOT LOCK actionMutex. We should perform deep copies of the table
+// elements here, don't want to share deck (which are slices) between the
+// clientUI and the given table. Hence we use the Clone() method while copying
+// the decks.
 func (clientUI *ClientUI) initTableElements(table *uknow.Table, localPlayerName string) {
 	// Initialize the handCountChart
 	playerCount := len(table.PlayerNames)
@@ -205,12 +208,10 @@ func (clientUI *ClientUI) initTableElements(table *uknow.Table, localPlayerName 
 	clientUI.drawDeckGauge.Percent = table.DrawDeck.Len()
 
 	// Update the pile cells
-	clientUI.updateDiscardPileCells()
+	clientUI.initDiscardPileCells(table)
 
-	// Initialize the player hand widget
-	for _, card := range table.HandOfPlayer[localPlayerName] {
-		clientUI.playerHand = clientUI.playerHand.Push(card)
-	}
+	// Initialize the player hand widget.
+	clientUI.playerHand = table.HandOfPlayer[localPlayerName].Clone()
 	sort.Sort(clientUI.playerHand)
 	clientUI.updatePlayerHandWidget()
 }
@@ -259,6 +260,7 @@ func (clientUI *ClientUI) initWidgetObjects() {
 	clientUI.handCountChart.Labels = make([]string, 0, 16)
 	clientUI.handCountChart.Data = make([]float64, 0, 16)
 	clientUI.handCountChart.Title = "Hand count"
+	clientUI.handCountChart.MaxVal = 20
 
 	clientUI.drawDeckGauge = widgets.NewGauge()
 	clientUI.drawDeckGauge.Percent = 100
@@ -286,9 +288,8 @@ func (clientUI *ClientUI) initWidgetObjects() {
 	clientUI.discardPileCells = make([]interface{}, 0, numCardsToShowInPile)
 	for i := 0; i < numCardsToShowInPile; i++ {
 		p := widgets.NewParagraph()
-		p.Text = "EMPTY PILE CELL"
-		p.Title = "PileCell"
-		p.TextStyle.Bg = ui.ColorRed
+		p.Text = "_"
+		p.Title = ""
 		clientUI.discardPileCells = append(clientUI.discardPileCells, p)
 	}
 }
@@ -303,11 +304,15 @@ func uiColorOfCard(color uknow.Color) ui.Color {
 		return ui.ColorGreen
 	case uknow.Yellow:
 		return ui.ColorYellow
+	case uknow.Wild:
+		return ui.ColorMagenta
 	}
 	panic(fmt.Sprintf("Unexpected Color value: %d", color))
 }
 
-func (clientUI *ClientUI) updateDiscardPileCells() {
+func (clientUI *ClientUI) initDiscardPileCells(table *uknow.Table) {
+	clientUI.discardPile = table.DiscardedPile.Clone()
+
 	low := len(clientUI.discardPile) - numCardsToShowInPile
 	if low < 0 {
 		low = 0
@@ -483,7 +488,7 @@ func (clientUI *ClientUI) RunCardTransferEventProcessor(localPlayerName string) 
 }
 
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
-	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, playerName: %s", event.String(), localPlayerName))
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(), localPlayerName))
 
 	switch event.Source {
 	case uknow.CardTransferNodeDeck:

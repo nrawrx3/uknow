@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var ErrorCouldNotFindCard = "could not find card in given deck"
+type Number int
 
 type Card struct {
 	Number Number
@@ -19,19 +19,29 @@ func (c *Card) String() string {
 	return fmt.Sprintf("%s of %s", c.Number.String(), c.Color.String())
 }
 
+func (c Card) IsLessThan(c1 Card) bool {
+	return c.Color < c1.Color || c.Number < c1.Number
+}
+
+func (c Card) IsEqual(c1 Card) bool {
+	return c.Color == c1.Color && c.Number == c1.Number
+}
+
 // Special cards
 const (
-	CardSkip = iota + 10
-	CardReverse
-	CardDrawTwo
-	CardWild
-	CardWildDrawFour
+	NumberSkip         Number = 10 + iota
+	NumberReverse      Number = 10 + iota
+	NumberDrawTwo      Number = 10 + iota
+	NumberWild         Number = 10 + iota
+	NumberWildDrawFour Number = 10 + iota
 )
 
-type Number int
-
 func (num Number) IsAction() bool {
-	return CardSkip <= num && num <= CardWildDrawFour
+	return NumberSkip <= num && num <= NumberWildDrawFour
+}
+
+func (c Card) IsWild() bool {
+	return c.Number == NumberWild || c.Number == NumberWildDrawFour
 }
 
 func (num *Number) String() string {
@@ -42,15 +52,15 @@ func (num *Number) String() string {
 	}
 
 	switch n {
-	case CardSkip:
+	case NumberSkip:
 		return "Skip"
-	case CardReverse:
+	case NumberReverse:
 		return "Reverse"
-	case CardDrawTwo:
+	case NumberDrawTwo:
 		return "DrawTwo"
-	case CardWild:
+	case NumberWild:
 		return "Wild"
-	case CardWildDrawFour:
+	case NumberWildDrawFour:
 		return "WildDrawFour"
 	default:
 		return fmt.Sprintf("invalid_number(= %d)", n)
@@ -58,7 +68,7 @@ func (num *Number) String() string {
 }
 
 func IntToNumber(n int) (Number, error) {
-	if 0 <= n && n <= CardWildDrawFour {
+	if 0 <= n && n <= int(NumberWildDrawFour) {
 		return Number(n), nil
 	}
 	return 0, fmt.Errorf("InvalidCardNumber(%d)", n)
@@ -67,10 +77,11 @@ func IntToNumber(n int) (Number, error) {
 type Color int
 
 const (
-	Red Color = 1 + iota
-	Green
-	Blue
-	Yellow
+	Wild   Color = 0
+	Red    Color = 1
+	Green  Color = 2
+	Blue   Color = 3
+	Yellow Color = 4
 )
 
 func (c *Color) String() string {
@@ -117,11 +128,17 @@ func (d Deck) Len() int {
 }
 
 func (d Deck) Less(i, j int) bool {
-	return d[i].Color < d[j].Color || (d[i].Number < d[j].Number) || (i < j)
+	return d[i].IsLessThan(d[j]) || (i < j)
 }
 
 func (d Deck) Swap(i, j int) {
 	d[i], d[j] = d[j], d[i]
+}
+
+func (d Deck) Clone() Deck {
+	newDeck := make(Deck, len(d), cap(d))
+	copy(newDeck, d)
+	return newDeck
 }
 
 func NewEmptyDeck() Deck {
@@ -132,7 +149,7 @@ func NewFullDeck() Deck {
 	// Non zero cards upto CardDrawTwo, 9 of them for each color
 	cards := make([]Card, 0, 9*8)
 	for color := 1; color <= 4; color++ {
-		for number := 1; number <= CardDrawTwo; number++ {
+		for number := 1; number <= int(NumberDrawTwo); number++ {
 			cards = append(cards, Card{Number: Number(number), Color: Color(color)})
 		}
 	}
@@ -145,10 +162,10 @@ func NewFullDeck() Deck {
 		cards = append(cards, Card{Number: 0, Color: Color(color)})
 	}
 
-	// 4 CardWild and 4 CardWildDrawFour
+	// 4 NumberWild and 4 NumberWildDrawFour cards
 	for i := 0; i < 4; i++ {
-		cards = append(cards, Card{Number: CardWildDrawFour, Color: 0})
-		cards = append(cards, Card{Number: CardWild, Color: 0})
+		cards = append(cards, Card{Number: NumberWildDrawFour, Color: Wild})
+		cards = append(cards, Card{Number: NumberWild, Color: Wild})
 	}
 
 	deck := Deck(cards)
@@ -156,17 +173,19 @@ func NewFullDeck() Deck {
 	return deck
 }
 
+var ErrEmptyDeck = errors.New("empty deck")
+
 func (d Deck) IsEmpty() bool {
 	return len(d) == 0
 }
 
-func (d Deck) Push(c Card) Deck {
-	return append(d, c)
+func (d Deck) Push(c ...Card) Deck {
+	return append(d, c...)
 }
 
 func (d Deck) Top() (Card, error) {
 	if d.IsEmpty() {
-		return Card{}, errors.New("Empty deck")
+		return Card{}, ErrEmptyDeck
 	}
 	return d[len(d)-1], nil
 }
@@ -180,7 +199,7 @@ func (d Deck) MustTop() Card {
 
 func (d Deck) Pop() (Deck, error) {
 	if d.IsEmpty() {
-		return d, errors.New("Empty deck")
+		return d, ErrEmptyDeck
 	}
 	return d[0 : len(d)-1], nil
 }
@@ -222,17 +241,42 @@ func (d Deck) MustFindCard(wantedCard Card) int {
 	panic(fmt.Sprintf("Could not find card '%s' in given deck", wantedCard.String()))
 }
 
+type TurnStateBits uint64
+
+const (
+	TurnStateStart      TurnStateBits = 1 << iota
+	TurnStateCardDrawn  TurnStateBits = 1 << iota
+	TurnStateCardPlayed TurnStateBits = 1 << iota
+)
+
+func (stateBits TurnStateBits) HasFlag(flagBit TurnStateBits) bool {
+	return (stateBits & flagBit) != 0
+}
+
+func (stateBits TurnStateBits) SetFlag(flagBit TurnStateBits) TurnStateBits {
+	return stateBits | flagBit
+}
+
 type Table struct {
-	DrawDeck         Deck            `json:"draw_deck"`
-	Pile             Deck            `json:"pile"`
-	IndexOfPlayer    map[string]int  `json:"index_of_player"`
-	HandOfPlayer     map[string]Deck `json:"hand_of_player"`
-	PlayerNames      StringSlice     `json:"player_names"`
-	LocalPlayerName  string          `json:"local_player_name"`
-	ShufflerName     string          `json:"shuffler_name"`
-	NextPlayerToDraw string          `json:"next_player_to_draw"`
-	Direction        int             `json:"direction"`
-	Logger           *log.Logger
+	Logger *log.Logger `json:"-"`
+
+	DrawDeck        Deck            `json:"draw_deck"`
+	DiscardedPile   Deck            `json:"discarded_pile"`
+	IndexOfPlayer   map[string]int  `json:"index_of_player"`
+	HandOfPlayer    map[string]Deck `json:"hand_of_player"`
+	PlayerNames     StringSlice     `json:"player_names"`
+	LocalPlayerName string          `json:"local_player_name"`
+	ShufflerName    string          `json:"shuffler_name"`
+	PlayerToDraw    string          `json:"next_player_to_draw"`
+	Direction       int             `json:"direction"`
+	TurnsCompleted  int             `json:"turns_completed"`
+	PlayerTurnState TurnStateBits   `json:"turn_state_bits"`
+	IsShuffled      bool            `json:"is_shuffled"`
+	RequiredColor   Color           `json:"required_color"`
+	// ^ We cannot determine elligible play card color simply from top of
+	// discard pile since wild card player enfoces a specific color for next
+	// player. This field is to be kept in sync whenever a player discards a
+	// card
 }
 
 func NewTable(localPlayerName string, logger *log.Logger) *Table {
@@ -245,15 +289,16 @@ func NewTable(localPlayerName string, logger *log.Logger) *Table {
 // Shallow-copies other into the receiver table
 func (t *Table) Set(other *Table) {
 	t.DrawDeck = other.DrawDeck
-	t.Pile = other.Pile
+	t.DiscardedPile = other.DiscardedPile
 	t.IndexOfPlayer = other.IndexOfPlayer
 	t.HandOfPlayer = other.HandOfPlayer
 	t.PlayerNames = other.PlayerNames
 	// NOTE: Not copying local player name since it doesn't make sense.
 	// CONSIDER: In fact, we could get rid of the LocalPlayerName field altogether and pass it around instead.
 	t.ShufflerName = other.ShufflerName
-	t.NextPlayerToDraw = other.NextPlayerToDraw
+	t.PlayerToDraw = other.PlayerToDraw
 	t.Direction = other.Direction
+	t.IsShuffled = other.IsShuffled
 }
 
 func NewAdminTable(logger *log.Logger) *Table {
@@ -264,13 +309,13 @@ func (t *Table) Summary() string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("DrawDeck count: %d\n", t.DrawDeck.Len()))
-	sb.WriteString(fmt.Sprintf("Pile count: %d\n", t.Pile.Len()))
+	sb.WriteString(fmt.Sprintf("Pile count: %d\n", t.DiscardedPile.Len()))
 	sb.WriteString("Hand counts, Index:\n----------\n")
 	for playerName, hand := range t.HandOfPlayer {
 		sb.WriteString(fmt.Sprintf("%s: %d, %d\n", playerName, hand.Len(), t.IndexOfPlayer[playerName]))
 	}
 	sb.WriteString(fmt.Sprintf("Shuffler: %s\n", t.ShufflerName))
-	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.NextPlayerToDraw))
+	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.PlayerToDraw))
 	sb.WriteString(fmt.Sprintf("Direction: %d\n", t.Direction))
 
 	return sb.String()
@@ -278,13 +323,14 @@ func (t *Table) Summary() string {
 
 func createNewTable(logger *log.Logger) *Table {
 	return &Table{
-		DrawDeck:      NewFullDeck(),
-		Pile:          NewEmptyDeck(),
-		HandOfPlayer:  make(map[string]Deck),
-		IndexOfPlayer: make(map[string]int),
-		PlayerNames:   make([]string, 0, 16),
-		Direction:     1,
-		Logger:        logger,
+		DrawDeck:        NewFullDeck(),
+		DiscardedPile:   NewEmptyDeck(),
+		HandOfPlayer:    make(map[string]Deck),
+		IndexOfPlayer:   make(map[string]int),
+		PlayerNames:     make([]string, 0, 16),
+		Direction:       1,
+		Logger:          logger,
+		PlayerTurnState: TurnStateStart,
 	}
 }
 
@@ -292,12 +338,12 @@ func (t *Table) IsServerTable() bool {
 	return t.LocalPlayerName == ""
 }
 
-var PlayerAlreadyExists error = errors.New("Player already exists")
+var ErrPlayerAlreadyExists = errors.New("player already exists")
 
 func (t *Table) AddPlayer(playerName string) error {
 	for _, existingName := range t.PlayerNames {
 		if existingName == playerName {
-			return errors.New("Existing player has same name as to-be-added player")
+			return errors.New("existing player has same name as to-be-added player")
 		}
 	}
 
@@ -309,7 +355,7 @@ func (t *Table) AddPlayer(playerName string) error {
 
 func (t *Table) PlayerIndicesSortedByTurn() []int {
 	sortedIndices := make([]int, t.PlayerCount())
-	curIndex := t.IndexOfPlayer[t.NextPlayerToDraw]
+	curIndex := t.IndexOfPlayer[t.PlayerToDraw]
 	for i := 0; i < t.PlayerCount(); i++ {
 		sortedIndices[i] = curIndex
 		curIndex = t.GetNextPlayerIndex(curIndex, 1)
@@ -363,6 +409,10 @@ func (t *Table) RearrangePlayerIndices(indices []int) {
 }
 
 func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
+	if t.IsShuffled {
+		t.Logger.Printf("WARNING: Already shuffled deck")
+	}
+
 	if startingHandCount <= 0 || startingHandCount > 12 {
 		panic("Let's not use too large of a starting hand count")
 	}
@@ -381,28 +431,26 @@ func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
 	}
 
 	topCard, _ := t.DrawDeck.Top()
-	t.DrawDeck.Pop()
-	t.Pile.Push(topCard)
+	t.DrawDeck = t.DrawDeck.MustPop()
+	t.DiscardedPile = t.DiscardedPile.Push(topCard)
 
 	t.Logger.Printf("Top card: %+v", topCard)
 
-	if topCard.Number == CardReverse {
+	if topCard.Number == NumberReverse {
 		t.Direction = -t.Direction
 	}
 
+	if topCard.IsWild() {
+		// TODO(@rk): Make player choose the color if wild
+		t.RequiredColor = Red
+	} else {
+		t.RequiredColor = topCard.Color
+	}
+
 	indexOfNextPlayer := t.GetNextPlayerIndex(t.IndexOfPlayer[t.ShufflerName], 1)
-	t.NextPlayerToDraw = t.PlayerNames[indexOfNextPlayer]
-}
+	t.PlayerToDraw = t.PlayerNames[indexOfNextPlayer]
 
-const (
-	EligiblePlayerActionPullFromDeck = iota
-	EligiblePlayerActionPullFromPile
-	EligiblePlayerActionPlayCardFromHand
-)
-
-type EligiblePlayerActionInfo struct {
-	Action        int
-	EligibleCards Deck
+	t.IsShuffled = true
 }
 
 type PlayerDecisionKind int
@@ -433,16 +481,40 @@ func (t *Table) EvalPlayerDecisions(playerName string, decisions []PlayerDecisio
 	}
 }
 
+type EvalDecisionError struct {
+	Decision PlayerDecision
+	Reason   error
+}
+
+var ErrCardNotInHand = errors.New("card not in hand")
+var ErrAlreadyDrewCard = errors.New("already drew card this turn")
+var ErrDrawDeckIsEmpty = errors.New("draw-deck is empty")
+var ErrDiscardPileIsEmpty = errors.New("discard pile is empty")
+var ErrUnknownPlayer = errors.New("unknown player")
+var ErrIllegalPlayCard = errors.New("card illegal")
+
+func (e *EvalDecisionError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Reason.Error(), e.Decision.String())
+}
+
 // TODO(@rk): Incomplete. Takes a decision event, "evaluates" the bare minimum,
 // i.e. update deck/pile/hand of the decision player and pushes the event to the
 // transferEventChan. We need to do the whole "game logic" in this function.
-func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) PlayerDecision {
+// LIST THE NEXT ELIGIBLE CARDS THAT CAN BE PLAYED BY THE PLAYER
+func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) (PlayerDecision, error) {
 	handOfPlayer := t.HandOfPlayer[playerName]
 
 	switch decision.Kind {
 	case PlayerDecisionPullFromDeck:
-		// TODO(@rk): Related to logic - can't allow player to draw card if there's no card in dec
-		topCard := t.DrawDeck.MustTop()
+		if t.PlayerTurnState.HasFlag(TurnStateCardDrawn) {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrAlreadyDrewCard}
+		}
+
+		topCard, err := t.DrawDeck.Top()
+		if err != nil {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrDrawDeckIsEmpty}
+		}
+
 		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
 		t.DrawDeck = t.DrawDeck.MustPop()
 
@@ -454,12 +526,20 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 		}
 
 		decision.ResultCard = topCard
+		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
+		t.Logger.Printf("Evaluated decision: %s", decision.String())
 
 	case PlayerDecisionPullFromPile:
-		// TODO(@rk): See above
-		topCard := t.Pile.MustTop()
+		if t.PlayerTurnState.HasFlag(TurnStateCardDrawn) {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrAlreadyDrewCard}
+		}
+
+		topCard, err := t.DiscardedPile.Top()
+		if err != nil {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrDiscardPileIsEmpty}
+		}
 		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
-		t.Pile = t.Pile.MustPop()
+		t.DiscardedPile = t.DiscardedPile.MustPop()
 
 		transferEventsChan <- CardTransferEvent{
 			Source:     CardTransferNodePile,
@@ -469,26 +549,95 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 		}
 
 		decision.ResultCard = topCard
+		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
 
 	case PlayerDecisionPlayHandCard:
-		t.PlayCard(playerName, decision.ResultCard, transferEventsChan)
+		t.TryPlayCard(playerName, decision.ResultCard, transferEventsChan)
 	}
 
 	// TODO(@rk): This also depends on the logic. Simply moving to next player
 	playerIndex := t.PlayerIndexFromName(playerName)
-	t.NextPlayerToDraw = t.PlayerNames[t.GetNextPlayerIndex(playerIndex, t.Direction)]
+	nextPlayerIndex := t.GetNextPlayerIndex(playerIndex, t.Direction)
+	t.Logger.Printf("cur player index: %d, next player index: %d", playerIndex, nextPlayerIndex)
+	t.Logger.Printf("next player to draw: %s", t.PlayerToDraw)
+	t.PlayerToDraw = t.PlayerNames[nextPlayerIndex]
+	t.PlayerTurnState = TurnStateStart
 
-	return decision
+	return decision, nil
 }
 
 // TODO(@rk): Incomplete. See EvalPlayerDecisionEvent
-func (t *Table) PlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) {
+// func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) {
+// 	// Remove card from hand and put it on pile
+// 	hand := t.HandOfPlayer[playerName]
+// 	cardLoc := hand.MustFindCard(cardToPlay)
+// 	hand = append(hand[0:cardLoc], hand[cardLoc+1:]...)
+// 	t.HandOfPlayer[playerName] = hand
+// 	t.Pile.Push(cardToPlay)
+
+// 	transferEventsChan <- CardTransferEvent{
+// 		Source:       CardTransferNodePlayerHand,
+// 		Sink:         CardTransferNodePile,
+// 		SourcePlayer: playerName,
+// 	}
+
+// 	// TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
+// }
+
+// CONSIDER(@rk): For replay events, we shouldn't need to check rules.
+func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) error {
+	// This procedure's precondition is that it was indeed the player's turn. Given that, it checks if the play is valid
+	decision := PlayerDecision{
+		Kind:       PlayerDecisionPlayHandCard,
+		ResultCard: cardToPlay,
+	}
+
+	// cardToPlay must come from hand
+	playerHand, ok := t.HandOfPlayer[playerName]
+	if !ok {
+		return &EvalDecisionError{
+			Decision: decision,
+			Reason:   fmt.Errorf("%w: %s", ErrUnknownPlayer, playerName),
+		}
+	}
+
+	_, err := playerHand.FindCard(cardToPlay)
+	if err != nil {
+		return &EvalDecisionError{
+			Decision: decision,
+			Reason:   ErrCardNotInHand,
+		}
+	}
+
+	// Check top of discard pile
+	topOfPile, err := t.DiscardedPile.Top()
+	if err != nil {
+		panic("Should be unreachable. Discard pile always has at least 1 card")
+	}
+
+	numberMatches := topOfPile.Number == cardToPlay.Number || cardToPlay.IsWild()
+	colorMatches := t.RequiredColor == cardToPlay.Color
+
+	if !numberMatches && !colorMatches {
+		return &EvalDecisionError{
+			Decision: decision,
+			Reason: fmt.Errorf("%w: %s, (color should be: %s OR number should be %s)",
+				ErrIllegalPlayCard,
+				cardToPlay.String(),
+				t.RequiredColor.String(),
+				topOfPile.Number.String(),
+			),
+		}
+	}
+
+	// Can play card
+
 	// Remove card from hand and put it on pile
 	hand := t.HandOfPlayer[playerName]
 	cardLoc := hand.MustFindCard(cardToPlay)
 	hand = append(hand[0:cardLoc], hand[cardLoc+1:]...)
 	t.HandOfPlayer[playerName] = hand
-	t.Pile.Push(cardToPlay)
+	t.DiscardedPile = t.DiscardedPile.Push(cardToPlay)
 
 	transferEventsChan <- CardTransferEvent{
 		Source:       CardTransferNodePlayerHand,
@@ -496,5 +645,5 @@ func (t *Table) PlayCard(playerName string, cardToPlay Card, transferEventsChan 
 		SourcePlayer: playerName,
 	}
 
-	// TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
+	return nil
 }

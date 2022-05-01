@@ -1,8 +1,6 @@
 package client
 
 import (
-	"log"
-
 	"github.com/rksht/uknow"
 )
 

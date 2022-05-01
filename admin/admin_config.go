@@ -8,5 +8,6 @@ type EnvConfig struct {
 	PauseMsecsBeforeNewTurn int    `split_words:"true" requured:"true"`
 
 	// Testing, debugging related options
-	DebugNewTurnViaPrompt bool `split_words:"true" default:"false"`
+	DebugNewTurnViaPrompt       bool   `split_words:"true" default:"false"`
+	DebugStartingHandConfigJSON string `split_words:"true"`
 }
