@@ -11,8 +11,8 @@ const (
 	colorMask       = (uint32(1<<colorBitsCount) - 1)
 )
 
-var errInvalidCardColor = errors.New("invalid card color")
-var errInvalidCardNumber = errors.New("invalid card number")
+var ErrInvalidCardColor = errors.New("invalid card color")
+var ErrInvalidCardNumber = errors.New("invalid card number")
 
 func (c Card) EncodeUint32() uint32 {
 	return (uint32(c.Number) << colorBitsCount) | uint32(c.Color)
@@ -21,11 +21,11 @@ func (c Card) EncodeUint32() uint32 {
 func DecodeCardFromUint32(x uint32) (Card, error) {
 	color := uint32(x & colorMask)
 	if color > uint32(Yellow) {
-		return Card{}, errInvalidCardColor
+		return Card{}, ErrInvalidCardColor
 	}
 	number := uint32(x&numberMask) >> colorBitsCount
 	if number > uint32(NumberWildDrawFour) {
-		return Card{}, errInvalidCardNumber
+		return Card{}, ErrInvalidCardNumber
 	}
 	return Card{Color: Color(color), Number: Number(number)}, nil
 }

@@ -39,7 +39,8 @@ import (
 		},
 
 		"discarded_pile_size": 16,
-		"shuffle_seed": 0 // 0 says don't shuffle before distributing
+		"shuffle_seed": 0 // 0 says don't shuffle before distributing,
+		"player_of_next_turn": "alice" // which player's turn it is on starting
 	}
 */
 
@@ -73,7 +74,7 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 
 	handDescOf := make(map[string]*handDesc)
 	discardedPileSize := 0
-	playerToDraw := ""
+	playerOfNextTurn := ""
 
 	for key, value := range j {
 		if strings.HasPrefix(key, "player.") {
@@ -92,8 +93,8 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 			discardedPileSize = int(number)
 		} else if key == "shuffle_seed" {
 			rand.Seed(int64(value.(float64)))
-		} else if key == "player_to_draw" {
-			playerToDraw = strings.TrimSpace(value.(string))
+		} else if key == "player_of_next_turn" {
+			playerOfNextTurn = strings.TrimSpace(value.(string))
 		} else {
 			return nil, fmt.Errorf("%w: %s", ErrUnknownKey, key)
 		}
@@ -102,7 +103,7 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 	serializedJSON := serializedJSON{
 		handDescOfPlayer:  handDescOf,
 		discardedPileSize: discardedPileSize,
-		playerToDraw:      playerToDraw,
+		playerToDraw:      playerOfNextTurn,
 	}
 
 	return makeTable(serializedJSON, initializedTable, logger)
@@ -163,7 +164,7 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 	}
 
 	table.IsShuffled = true
-	table.PlayerToDraw = serializedJSON.playerToDraw
+	table.PlayerOfNextTurn = serializedJSON.playerToDraw
 	table.PlayerTurnState = uknow.TurnStateStart
 
 	return table, nil

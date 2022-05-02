@@ -260,19 +260,19 @@ func (stateBits TurnStateBits) SetFlag(flagBit TurnStateBits) TurnStateBits {
 type Table struct {
 	Logger *log.Logger `json:"-"`
 
-	DrawDeck        Deck            `json:"draw_deck"`
-	DiscardedPile   Deck            `json:"discarded_pile"`
-	IndexOfPlayer   map[string]int  `json:"index_of_player"`
-	HandOfPlayer    map[string]Deck `json:"hand_of_player"`
-	PlayerNames     StringSlice     `json:"player_names"`
-	LocalPlayerName string          `json:"local_player_name"`
-	ShufflerName    string          `json:"shuffler_name"`
-	PlayerToDraw    string          `json:"next_player_to_draw"`
-	Direction       int             `json:"direction"`
-	TurnsCompleted  int             `json:"turns_completed"`
-	PlayerTurnState TurnStateBits   `json:"turn_state_bits"`
-	IsShuffled      bool            `json:"is_shuffled"`
-	RequiredColor   Color           `json:"required_color"`
+	DrawDeck         Deck            `json:"draw_deck"`
+	DiscardedPile    Deck            `json:"discarded_pile"`
+	IndexOfPlayer    map[string]int  `json:"index_of_player"`
+	HandOfPlayer     map[string]Deck `json:"hand_of_player"`
+	PlayerNames      StringSlice     `json:"player_names"`
+	LocalPlayerName  string          `json:"local_player_name"`
+	ShufflerName     string          `json:"shuffler_name"`
+	PlayerOfNextTurn string          `json:"player_of_next_turn"`
+	Direction        int             `json:"direction"`
+	TurnsCompleted   int             `json:"turns_completed"`
+	PlayerTurnState  TurnStateBits   `json:"turn_state_bits"`
+	IsShuffled       bool            `json:"is_shuffled"`
+	RequiredColor    Color           `json:"required_color"`
 	// ^ We cannot determine elligible play card color simply from top of
 	// discard pile since wild card player enfoces a specific color for next
 	// player. This field is to be kept in sync whenever a player discards a
@@ -296,7 +296,7 @@ func (t *Table) Set(other *Table) {
 	// NOTE: Not copying local player name since it doesn't make sense.
 	// CONSIDER: In fact, we could get rid of the LocalPlayerName field altogether and pass it around instead.
 	t.ShufflerName = other.ShufflerName
-	t.PlayerToDraw = other.PlayerToDraw
+	t.PlayerOfNextTurn = other.PlayerOfNextTurn
 	t.Direction = other.Direction
 	t.IsShuffled = other.IsShuffled
 }
@@ -315,7 +315,7 @@ func (t *Table) Summary() string {
 		sb.WriteString(fmt.Sprintf("%s: %d, %d\n", playerName, hand.Len(), t.IndexOfPlayer[playerName]))
 	}
 	sb.WriteString(fmt.Sprintf("Shuffler: %s\n", t.ShufflerName))
-	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.PlayerToDraw))
+	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.PlayerOfNextTurn))
 	sb.WriteString(fmt.Sprintf("Direction: %d\n", t.Direction))
 
 	return sb.String()
@@ -355,7 +355,7 @@ func (t *Table) AddPlayer(playerName string) error {
 
 func (t *Table) PlayerIndicesSortedByTurn() []int {
 	sortedIndices := make([]int, t.PlayerCount())
-	curIndex := t.IndexOfPlayer[t.PlayerToDraw]
+	curIndex := t.IndexOfPlayer[t.PlayerOfNextTurn]
 	for i := 0; i < t.PlayerCount(); i++ {
 		sortedIndices[i] = curIndex
 		curIndex = t.GetNextPlayerIndex(curIndex, 1)
@@ -448,7 +448,7 @@ func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
 	}
 
 	indexOfNextPlayer := t.GetNextPlayerIndex(t.IndexOfPlayer[t.ShufflerName], 1)
-	t.PlayerToDraw = t.PlayerNames[indexOfNextPlayer]
+	t.PlayerOfNextTurn = t.PlayerNames[indexOfNextPlayer]
 
 	t.IsShuffled = true
 }
@@ -475,9 +475,18 @@ func (e *PlayerDecision) String() string {
 	return fmt.Sprintf("%s%s", e.Kind.String(), resultCard)
 }
 
-func (t *Table) EvalPlayerDecisions(playerName string, decisions []PlayerDecision, transferEventsChan chan<- CardTransferEvent) {
+func (t *Table) EvalPlayerDecisionsNoTransferChan(decidingPlayer string, decisions []PlayerDecision) {
+	dummyTransferChan := make(chan CardTransferEvent)
+	go func() {
+		for range dummyTransferChan {
+		}
+	}()
+	t.EvalPlayerDecisions(decidingPlayer, decisions, dummyTransferChan)
+}
+
+func (t *Table) EvalPlayerDecisions(decidingPlayer string, decisions []PlayerDecision, transferEventsChan chan<- CardTransferEvent) {
 	for _, decision := range decisions {
-		t.EvalPlayerDecision(playerName, decision, transferEventsChan)
+		t.EvalPlayerDecision(decidingPlayer, decision, transferEventsChan)
 	}
 }
 
@@ -501,8 +510,8 @@ func (e *EvalDecisionError) Error() string {
 // i.e. update deck/pile/hand of the decision player and pushes the event to the
 // transferEventChan. We need to do the whole "game logic" in this function.
 // LIST THE NEXT ELIGIBLE CARDS THAT CAN BE PLAYED BY THE PLAYER
-func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) (PlayerDecision, error) {
-	handOfPlayer := t.HandOfPlayer[playerName]
+func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) (PlayerDecision, error) {
+	handOfPlayer := t.HandOfPlayer[decidingPlayer]
 
 	switch decision.Kind {
 	case PlayerDecisionPullFromDeck:
@@ -515,19 +524,18 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrDrawDeckIsEmpty}
 		}
 
-		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
+		t.HandOfPlayer[decidingPlayer] = handOfPlayer.Push(topCard)
 		t.DrawDeck = t.DrawDeck.MustPop()
 
 		transferEventsChan <- CardTransferEvent{
 			Source:     CardTransferNodeDeck,
 			Sink:       CardTransferNodePlayerHand,
-			SinkPlayer: playerName,
+			SinkPlayer: decidingPlayer,
 			Card:       topCard,
 		}
 
 		decision.ResultCard = topCard
 		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
-		t.Logger.Printf("Evaluated decision: %s", decision.String())
 
 	case PlayerDecisionPullFromPile:
 		if t.PlayerTurnState.HasFlag(TurnStateCardDrawn) {
@@ -538,13 +546,13 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 		if err != nil {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrDiscardPileIsEmpty}
 		}
-		t.HandOfPlayer[playerName] = handOfPlayer.Push(topCard)
+		t.HandOfPlayer[decidingPlayer] = handOfPlayer.Push(topCard)
 		t.DiscardedPile = t.DiscardedPile.MustPop()
 
 		transferEventsChan <- CardTransferEvent{
 			Source:     CardTransferNodePile,
 			Sink:       CardTransferNodePlayerHand,
-			SinkPlayer: playerName,
+			SinkPlayer: decidingPlayer,
 			Card:       topCard,
 		}
 
@@ -552,37 +560,21 @@ func (t *Table) EvalPlayerDecision(playerName string, decision PlayerDecision, t
 		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
 
 	case PlayerDecisionPlayHandCard:
-		t.TryPlayCard(playerName, decision.ResultCard, transferEventsChan)
+		t.TryPlayCard(decidingPlayer, decision.ResultCard, transferEventsChan)
 	}
 
 	// TODO(@rk): This also depends on the logic. Simply moving to next player
-	playerIndex := t.PlayerIndexFromName(playerName)
+	playerIndex := t.PlayerIndexFromName(decidingPlayer)
 	nextPlayerIndex := t.GetNextPlayerIndex(playerIndex, t.Direction)
-	t.Logger.Printf("cur player index: %d, next player index: %d", playerIndex, nextPlayerIndex)
-	t.Logger.Printf("next player to draw: %s", t.PlayerToDraw)
-	t.PlayerToDraw = t.PlayerNames[nextPlayerIndex]
+	t.PlayerOfNextTurn = t.PlayerNames[nextPlayerIndex]
 	t.PlayerTurnState = TurnStateStart
+
+	t.Logger.Printf("Evaluated decision: %s\n\tfrom player: %s,\n\tplayer of next turn: %s", decision.String(), decidingPlayer, t.PlayerOfNextTurn)
 
 	return decision, nil
 }
 
-// TODO(@rk): Incomplete. See EvalPlayerDecisionEvent
-// func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) {
-// 	// Remove card from hand and put it on pile
-// 	hand := t.HandOfPlayer[playerName]
-// 	cardLoc := hand.MustFindCard(cardToPlay)
-// 	hand = append(hand[0:cardLoc], hand[cardLoc+1:]...)
-// 	t.HandOfPlayer[playerName] = hand
-// 	t.Pile.Push(cardToPlay)
-
-// 	transferEventsChan <- CardTransferEvent{
-// 		Source:       CardTransferNodePlayerHand,
-// 		Sink:         CardTransferNodePile,
-// 		SourcePlayer: playerName,
-// 	}
-
-// 	// TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
-// }
+// TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
 
 // CONSIDER(@rk): For replay events, we shouldn't need to check rules.
 func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) error {

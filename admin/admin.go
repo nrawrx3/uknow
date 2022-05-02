@@ -411,7 +411,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if setReadyMessage.ShufflerIsFirstPlayer {
-		admin.table.PlayerToDraw = admin.table.ShufflerName
+		admin.table.PlayerOfNextTurn = admin.table.ShufflerName
 	}
 
 	go admin.sendServeCardsEventToAllPlayers()
@@ -460,21 +460,13 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 }
 
 func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent) {
-	// FILTHY(@rk): Just spawning this goroutine to consume the card transfer events. The admin does not have a UI, so we could simply log it. Have to think.
-	transferEventsChan := make(chan uknow.CardTransferEvent)
-	go func() {
-		for transferEvent := range transferEventsChan {
-			admin.logger.Printf("Received %s", transferEvent.String())
-		}
-	}()
-
 	syncEvent := &messages.PlayerDecisionsSyncEvent{
 		PlayerDecisionsEvent: event,
 	}
 
 	// Evaluate the decisions on the admin table
 	admin.stateMutex.Lock()
-	admin.table.EvalPlayerDecisions(syncEvent.PlayerName, syncEvent.Decisions, transferEventsChan)
+	admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.PlayerName, syncEvent.Decisions)
 	admin.state = SyncingPlayerDecision
 	admin.stateMutex.Unlock()
 
@@ -589,12 +581,12 @@ func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
 
 	<-time.After(pauseBeforeChoosingPlayer)
 
-	admin.logger.Printf("Next turn: %s", admin.table.PlayerToDraw)
+	admin.logger.Printf("Next turn: %s", admin.table.PlayerOfNextTurn)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
 
-	chosenPlayer := admin.table.PlayerToDraw
+	chosenPlayer := admin.table.PlayerOfNextTurn
 
 	eventMsg := messages.ChosenPlayerEvent{
 		PlayerName:           chosenPlayer,
