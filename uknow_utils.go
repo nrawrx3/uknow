@@ -18,7 +18,7 @@ func CreateFileLogger(setAsDefault bool, playerName string) *log.Logger {
 		log.SetOutput(f)
 		return log.Default()
 	} else {
-		return log.New(f, playerName, log.Ltime|log.Lshortfile)
+		return log.New(f, playerName+"|", log.Ltime|log.Lshortfile)
 	}
 }
 

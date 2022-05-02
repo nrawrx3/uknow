@@ -37,36 +37,6 @@ const (
 	WaitingForDecisionSync        PlayerClientState = "waiting_for_decision_sync"
 )
 
-// func (c ClusterMap) Clone(excludePlayers []string) ClusterMap {
-// 	if excludePlayers == nil {
-// 		excludePlayers = []string{}
-// 	}
-
-// 	cloned := make(ClusterMap)
-// 	for k, v := range c {
-// 		exclude := false
-// 		for _, e := range excludePlayers {
-// 			if e == k {
-// 				exclude = true
-// 				break
-// 			}
-// 		}
-// 		if !exclude {
-// 			cloned[k] = v
-// 		}
-// 	}
-// 	return cloned
-// }
-
-// type askUIForUserTurnArgs struct {
-// 	// The PlayerClient itself will wait on this channel to receive the command input from user
-// 	receive               chan<- uknow.Command
-// 	timeout               time.Duration
-// 	sender                string
-// 	appQuitting           bool // Set by client to let UI know that the app is stopping
-// 	expectingUserDecision bool // Set by client to make UI expect a user decision command
-// }
-
 var ErrorClientAwaitingApproval = errors.New("client awaiting approval of previous command")
 var ErrorClientUnexpectedSender = errors.New("unexpected sender")
 var ErrorFailedToConnectToNewPlayer = errors.New("failed to connect to new player")
@@ -108,8 +78,6 @@ type PlayerClient struct {
 	ClientChannels
 
 	Logger *log.Logger
-
-	debugFlags DebugFlags
 }
 
 type ConfigNewPlayerClient struct {
@@ -121,7 +89,7 @@ type ConfigNewPlayerClient struct {
 	DefaultAdminAddr utils.TCPAddress
 }
 
-func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *PlayerClient {
+func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	c := &PlayerClient{
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
@@ -129,7 +97,6 @@ func NewPlayerClient(config *ConfigNewPlayerClient, debugFlags DebugFlags) *Play
 		neighborListenAddr: make(ClusterMap),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
-		debugFlags:         debugFlags,
 		adminAddr:          config.DefaultAdminAddr,
 	}
 
@@ -285,23 +252,6 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 	}
 }
 
-// func (c *PlayerClient) printTableInfo(uiState *ClientUI) {
-// 	handCounts := make(map[string]int)
-// 	for playerName, hand := range c.table.HandOfPlayer {
-// 		handCounts[playerName] = len(hand)
-// 	}
-
-// 	msg := fmt.Sprintf(`
-// Players:	%+v,
-// Hand counts:	%+v,
-// DrawDeck count: %+v,
-// DiscardPile count: %+v`,
-// 		c.table.PlayerNames, handCounts, len(c.table.DrawDeck), len(c.table.Pile))
-// 	uiState.appendEventLog(msg)
-// 	c.Logger.Printf(msg)
-// 	c.LogWindowPushChan <- msg
-// }
-
 func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
 	format = "Client: " + format
 	message := fmt.Sprintf(format, args...)
@@ -316,7 +266,7 @@ func (c *PlayerClient) initRouterHandlers() {
 
 	// NOTE(@rk): Event the message handlers and paths convention. Starts with "/event"
 
-	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardEvent)
+	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardsEvent)
 	c.router.Path("/event/chosen_player").Methods("POST").HandlerFunc(c.handleChosenPlayerEvent)
 	c.router.Path("/event/player_decisions_sync").Methods("POST").HandlerFunc(c.handlePlayerDecisionsSyncEvent)
 
@@ -373,7 +323,7 @@ func (c *PlayerClient) handleGetPlayers(w http.ResponseWriter, r *http.Request) 
 	c.Logger.Printf("Received GET /players. Sending: %+v", msg)
 }
 
-func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Request) {
+func (c *PlayerClient) handleServedCardsEvent(w http.ResponseWriter, r *http.Request) {
 	c.Logger.Printf("Received POST /event/served_cards")
 
 	var servedCardsEvent messages.ServedCardsEvent
@@ -396,6 +346,8 @@ func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Requ
 	}
 
 	servedCardsEvent.Table.LocalPlayerName = c.table.LocalPlayerName
+	c.Logger.Printf("Client: served cards has handOfPlayer: %+v", servedCardsEvent.Table.HandOfPlayer)
+
 	c.table.Set(&servedCardsEvent.Table)
 
 	uiCommand := &UICommandSetServedCards{
@@ -411,7 +363,7 @@ func (c *PlayerClient) handleServedCardEvent(w http.ResponseWriter, r *http.Requ
 }
 
 func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Request) {
-	c.Logger.Printf("Received POST /event/served_cards")
+	c.Logger.Printf("Received POST /event/chosen_player")
 
 	var chosenPlayerEvent messages.ChosenPlayerEvent
 	err := json.NewDecoder(r.Body).Decode(&chosenPlayerEvent)
@@ -441,10 +393,10 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	}
 
 	c.clientState = AskingUserForDecision
-	go c.askAndRunUserDecisions()
+	go c.askAndRunUserDecisions(chosenPlayerEvent.DecisionEventCounter)
 }
 
-func (c *PlayerClient) askAndRunUserDecisions() {
+func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	c.stateMutex.Lock()
 	defer c.stateMutex.Unlock()
 
@@ -471,8 +423,7 @@ func (c *PlayerClient) askAndRunUserDecisions() {
 		decision, err := c.evalReplCommandOnTable(replCommand)
 
 		if err != nil {
-			c.Logger.Print(err)
-			break
+			c.Logger.Fatalf("evalReplCommandOnTable failed: %s", err.Error())
 		}
 
 		c.Logger.Printf("Received replCommand: %s, decisionEvent: %s", replCommand.Kind.String(), &decision)
@@ -488,10 +439,11 @@ func (c *PlayerClient) askAndRunUserDecisions() {
 
 	c.Logger.Printf("Done receiving player decision events from ClientUI")
 
-	// TODO(@rk): Send the PlayerDecisionEvent list as a request to admin on the /player_decisions path
+	// Send decisions to admin
 	requestBody := messages.PlayerDecisionsEvent{
-		Decisions:  decisions,
-		PlayerName: c.table.LocalPlayerName,
+		Decisions:            decisions,
+		PlayerName:           c.table.LocalPlayerName,
+		DecisionEventCounter: decisionEventCounter,
 	}
 
 	requester := utils.RequestSender{
@@ -500,6 +452,8 @@ func (c *PlayerClient) askAndRunUserDecisions() {
 		Client:     c.httpClient,
 		BodyReader: messages.MustJSONReader(&requestBody),
 	}
+
+	c.Logger.Printf("Sending decisions to admin: %+v", requestBody)
 
 	resp, err := requester.Send(context.TODO())
 	if err != nil {
@@ -545,6 +499,7 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 	}
 
 	// Eval decisions of other player
+	c.Logger.Printf("Evaluating player %s's decisions: %+v", decisionsEvent.PlayerName, decisionsEvent)
 	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, c.CardTransferEventPushChan)
 
 	c.clientState = WaitingForAdminToChoosePlayer
@@ -557,20 +512,21 @@ func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.P
 			Kind:       uknow.PlayerDecisionPlayHandCard,
 			ResultCard: replCommand.Cards[0],
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
+
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
 
 	case CmdDrawCard:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
 
 	case CmdDrawCardFromPile:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan), nil
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
 
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())

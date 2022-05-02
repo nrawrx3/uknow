@@ -58,7 +58,8 @@ func (*ServedCardsEvent) RestPath() string {
 }
 
 type ChosenPlayerEvent struct {
-	PlayerName string `json:"player_name"`
+	PlayerName           string `json:"player_name"`
+	DecisionEventCounter int    `json:"decision_event_counter"`
 }
 
 func (*ChosenPlayerEvent) RestPath() string {
@@ -66,8 +67,9 @@ func (*ChosenPlayerEvent) RestPath() string {
 }
 
 type PlayerDecisionsEvent struct {
-	Decisions  []uknow.PlayerDecision `json:"events"`
-	PlayerName string                 `json:"player_name"`
+	Decisions            []uknow.PlayerDecision `json:"decisions"`
+	PlayerName           string                 `json:"player_name"`
+	DecisionEventCounter int                    `json:"decision_event_counter"` // counter for tracking/debugging decisions in case of disconnections
 }
 
 func (*PlayerDecisionsEvent) RestPath() string {

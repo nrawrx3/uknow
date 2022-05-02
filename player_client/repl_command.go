@@ -187,15 +187,15 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 
 	switch text := strings.ToLower(s.TokenText()); text {
 	case "skip":
-		card.Number = uknow.CardSkip
+		card.Number = uknow.NumberSkip
 	case "rev":
-		card.Number = uknow.CardReverse
+		card.Number = uknow.NumberReverse
 	case "draw2":
-		card.Number = uknow.CardDrawTwo
+		card.Number = uknow.NumberDrawTwo
 	case "wild":
-		card.Number = uknow.CardWild
+		card.Number = uknow.NumberWild
 	case "wild4":
-		card.Number = uknow.CardWildDrawFour
+		card.Number = uknow.NumberWildDrawFour
 	default:
 		number, err := strconv.Atoi(text)
 		if err != nil {
@@ -210,7 +210,7 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 		}
 	}
 
-	if card.Number == uknow.CardWild || card.Number == uknow.CardWildDrawFour {
+	if card.Number == uknow.NumberWild || card.Number == uknow.NumberWildDrawFour {
 		cards = append(cards, card)
 		tok := s.Scan()
 
