@@ -41,7 +41,7 @@ type ClientUIChannels struct {
 	GeneralReplCommandPushChan chan<- *ReplCommand
 }
 
-const numCardsToShowInPile = 10
+const numCardsToShowInPile = 12
 
 type ClientUI struct {
 	// stateMutex protects the uiState field. We must take care to always lock the mutexes in the order as they appear in this struct to prevent deadlocks.
@@ -240,7 +240,9 @@ func (clientUI *ClientUI) sortHandCountChartByTurn(table *uknow.Table) {
 func (clientUI *ClientUI) updatePlayerHandWidget() {
 	var sb strings.Builder
 	for _, card := range clientUI.playerHand {
-		sb.WriteString(fmt.Sprintf("(%s|%s) ", card.Color.String(), card.Number.String()))
+		// sb.WriteString(fmt.Sprintf("(%s|%s) ", card.Color.String(), card.Number.String()))
+		sb.WriteString(card.SymbolString())
+		sb.WriteString(" ")
 	}
 	clientUI.selfHandWidget.Text = sb.String()
 }
@@ -265,7 +267,7 @@ func (clientUI *ClientUI) initWidgetObjects() {
 	clientUI.drawDeckGauge = widgets.NewGauge()
 	clientUI.drawDeckGauge.Percent = 100
 	clientUI.drawDeckGauge.BarColor = ui.ColorWhite
-	clientUI.drawDeckGauge.Title = "DrawDeck"
+	// clientUI.drawDeckGauge.Title = "DrawDeck"
 	clientUI.drawDeckGauge.Border = false
 
 	clientUI.eventLogCell = widgets.NewParagraph()
@@ -321,9 +323,13 @@ func (clientUI *ClientUI) initDiscardPileCells(table *uknow.Table) {
 	cardsToShow := clientUI.discardPile[low:len(clientUI.discardPile)]
 
 	for i, card := range cardsToShow {
-		p := clientUI.discardPileCells[i].(*widgets.Paragraph)
-		p.Text = card.Number.String()
-		p.TextStyle.Bg = uiColorOfCard(card.Color)
+		// discardPileCells is organized high-to-low
+		cellIndex := len(clientUI.discardPileCells) - i - 1
+		p := clientUI.discardPileCells[cellIndex].(*widgets.Paragraph)
+		// p.Text = card.String()
+		p.Text = card.SymbolString()
+		p.Title = fmt.Sprintf("%d", i)
+		// p.TextStyle.Bg = uiColorOfCard(card.Color)
 	}
 }
 
@@ -359,13 +365,22 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 		pileCellRows = append(pileCellRows, ui.NewRow(sizePerPileCell, pileCell))
 	}
 
+	// clientUI.grid.Set(
+	// 	ui.NewRow(0.02, clientUI.drawDeckGauge),
+	// 	ui.NewRow(0.8,
+	// 		ui.NewCol(0.3, pileCellRows...),
+	// 		ui.NewCol(0.3, clientUI.handCountChart),
+	// 		ui.NewCol(0.4, clientUI.eventLogCell)),
+	// 	ui.NewRow(0.1, ui.NewCol(0.5, clientUI.selfHandWidget), ui.NewCol(0.5, clientUI.commandPromptCell)),
+	// )
 	clientUI.grid.Set(
-		ui.NewRow(0.1, clientUI.drawDeckGauge),
+		ui.NewRow(0.02, clientUI.drawDeckGauge),
 		ui.NewRow(0.8,
 			ui.NewCol(0.3, pileCellRows...),
 			ui.NewCol(0.3, clientUI.handCountChart),
 			ui.NewCol(0.4, clientUI.eventLogCell)),
-		ui.NewRow(0.1, ui.NewCol(0.5, clientUI.selfHandWidget), ui.NewCol(0.5, clientUI.commandPromptCell)),
+		ui.NewRow(0.08, clientUI.selfHandWidget),
+		ui.NewRow(0.1, clientUI.commandPromptCell),
 	)
 
 	clientUI.LogWindowPullChan = logWindowChan
