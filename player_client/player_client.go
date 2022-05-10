@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -61,6 +60,8 @@ type PlayerClient struct {
 	// Server used to service requests made by admin and other players
 	httpServer *http.Server
 
+	aesCipher *uknow.AESCipher
+
 	// NOTE(@rk): We are NOT storing connections to any of the other players
 	// in a PlayerClient. We let http.Transport do that for us using its own
 	// internal connection pool. We simply keep a map of player name to
@@ -87,6 +88,7 @@ type ConfigNewPlayerClient struct {
 	// HttpListenAddr             string
 	ListenAddr       utils.TCPAddress
 	DefaultAdminAddr utils.TCPAddress
+	AESCipher        *uknow.AESCipher
 }
 
 func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
@@ -98,6 +100,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		adminAddr:          config.DefaultAdminAddr,
+		aesCipher:          config.AESCipher,
 	}
 
 	c.router = mux.NewRouter()
@@ -186,10 +189,21 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 				ShufflerIsFirstPlayer: false,
 			}
 
-			resp, err := c.httpClient.Post(url, "application/json", messages.MustJSONReader(&setReadyMessage))
+			var b bytes.Buffer
+			messages.EncodeJSONAndEncrypt(&setReadyMessage, &b, c.aesCipher)
+
+			requestSender := utils.RequestSender{
+				Client:     c.httpClient,
+				Method:     "POST",
+				URL:        url,
+				BodyReader: &b,
+			}
+
+			resp, err := requestSender.Send(context.TODO())
 
 			if err != nil {
 				c.Logger.Print(err)
+				break
 			}
 
 			if resp.StatusCode != http.StatusOK {
@@ -218,7 +232,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 // DOES NOT LOCK stateMutex. Connects to admin and updates state on success.
 func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPlayersMessage, adminAddr utils.TCPAddress) {
 	var body bytes.Buffer
-	err := json.NewEncoder(&body).Encode(msg)
+	err := messages.EncodeJSONAndEncrypt(&msg, &body, c.aesCipher)
 	if err != nil {
 		c.Logger.Fatal(err)
 	}
@@ -236,7 +250,8 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 		c.Logger.Printf("connectToAdmin: Local player is already present in admin's table")
 	case http.StatusOK:
 		var respMsg messages.AddNewPlayersMessage
-		err := json.NewDecoder(resp.Body).Decode(&respMsg)
+		err := messages.DecryptAndDecodeJSON(&respMsg, resp.Body, c.aesCipher)
+
 		if err != nil {
 			c.Logger.Fatalf("connectToAdmin: Failed to read OK response message. %s", err)
 		} else {
@@ -286,7 +301,7 @@ func (c *PlayerClient) initRouterHandlers() {
 func (c *PlayerClient) handleAddNewPlayers(w http.ResponseWriter, r *http.Request) {
 	var msg messages.AddNewPlayersMessage
 
-	err := json.NewDecoder(r.Body).Decode(&msg)
+	err := messages.DecryptAndDecodeJSON(&msg, r.Body, c.aesCipher)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -314,7 +329,7 @@ func (c *PlayerClient) handleGetPlayers(w http.ResponseWriter, r *http.Request) 
 		ListenAddrOfPlayer: c.neighborListenAddr,
 	}
 
-	if err := json.NewEncoder(w).Encode(&msg); err != nil {
+	if err := messages.EncodeJSONAndEncrypt(&msg, w, c.aesCipher); err != nil {
 		c.Logger.Printf("GET /players error: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -328,7 +343,8 @@ func (c *PlayerClient) handleServedCardsEvent(w http.ResponseWriter, r *http.Req
 
 	var servedCardsEvent messages.ServedCardsEvent
 
-	err := json.NewDecoder(r.Body).Decode(&servedCardsEvent)
+	err := messages.DecryptAndDecodeJSON(&servedCardsEvent, r.Body, c.aesCipher)
+
 	if err != nil {
 		c.Logger.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -366,7 +382,8 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	c.Logger.Printf("Received POST /event/chosen_player")
 
 	var chosenPlayerEvent messages.ChosenPlayerEvent
-	err := json.NewDecoder(r.Body).Decode(&chosenPlayerEvent)
+	err := messages.DecryptAndDecodeJSON(&chosenPlayerEvent, r.Body, c.aesCipher)
+
 	if err != nil {
 		c.Logger.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -446,11 +463,14 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		DecisionEventCounter: decisionEventCounter,
 	}
 
+	var b bytes.Buffer
+	messages.EncodeJSONAndEncrypt(&requestBody, &b, c.aesCipher)
+
 	requester := utils.RequestSender{
 		URL:        fmt.Sprintf("%s/%s", c.adminAddr.String(), requestBody.RestPath()),
 		Method:     "POST",
 		Client:     c.httpClient,
-		BodyReader: messages.MustJSONReader(&requestBody),
+		BodyReader: &b,
 	}
 
 	c.Logger.Printf("Sending decisions to admin: %+v", requestBody)
@@ -476,7 +496,8 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *http.Request) {
 	c.Logger.Printf("Received player_decisions_sync message")
 	var decisionsEvent messages.PlayerDecisionsSyncEvent
-	err := json.NewDecoder(r.Body).Decode(&decisionsEvent)
+	err := messages.DecryptAndDecodeJSON(&decisionsEvent, r.Body, c.aesCipher)
+
 	if err != nil {
 		c.Logger.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -587,11 +608,14 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 				NewPlayer:   playerName,
 			}
 
+			var b bytes.Buffer
+			messages.EncodeJSONAndEncrypt(&ackMsg, &b, c.aesCipher)
+
 			requestSender = utils.RequestSender{
 				Client:     c.httpClient,
 				Method:     "POST",
 				URL:        adminURL,
-				BodyReader: messages.MustJSONReader(&ackMsg),
+				BodyReader: &b,
 			}
 
 			resp, err := requestSender.Send(ctxWithTimeout)
