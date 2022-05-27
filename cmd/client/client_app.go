@@ -10,6 +10,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
+	cmdcommon "github.com/rksht/uknow/cmd"
 	"github.com/rksht/uknow/internal/utils"
 	client "github.com/rksht/uknow/player_client"
 )
@@ -77,6 +78,18 @@ func RunApp() {
 
 	// FILTHY(@rk):TODO(@rk): Delete this when done with proper implementation in ui
 	client.DummyCardTransferEventConsumerChan = make(chan uknow.CardTransferEvent)
+
+	commonConfig, err := cmdcommon.LoadCommonConfig()
+	if err != nil {
+		log.Fatalf("failed to load common config: %v", err)
+	}
+
+	if commonConfig.EncryptMessages {
+		playerClientConfig.AESCipher, err = uknow.NewAESCipher(commonConfig.AESKey)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	c := client.NewPlayerClient(playerClientConfig)
 

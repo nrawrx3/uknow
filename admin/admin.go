@@ -1,8 +1,8 @@
 package admin
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
+	cmdcommon "github.com/rksht/uknow/cmd"
 	"github.com/rksht/uknow/hand_reader"
 	"github.com/rksht/uknow/internal/messages"
 	"github.com/rksht/uknow/internal/utils"
@@ -67,6 +68,8 @@ type Admin struct {
 	stateMutex sync.Mutex
 	state      AdminState
 
+	aesCipher *uknow.AESCipher
+
 	// Address of player registered on connect command
 	listenAddrOfPlayer      map[string]utils.TCPAddress
 	shuffler                string
@@ -83,6 +86,7 @@ type ConfigNewAdmin struct {
 	ListenAddr     utils.TCPAddress
 	Table          *uknow.Table
 	SetReadyPlayer string
+	aesCipher      *uknow.AESCipher
 }
 
 const logFilePrefix = "admin"
@@ -92,6 +96,7 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 		table:              config.Table,
 		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
 		shuffler:           "",
+		aesCipher:          config.aesCipher,
 		state:              AddingPlayers,
 		expectedAcksList:   newExpectedAcksState(),
 		logger:             uknow.CreateFileLogger(false, logFilePrefix),
@@ -169,7 +174,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	// Parse message
 	var msg messages.AddNewPlayersMessage
 
-	err := json.NewDecoder(r.Body).Decode(&msg)
+	err := messages.DecryptAndDecodeJSON(&msg, r.Body, admin.aesCipher)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -244,7 +249,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(respAddNewPlayersMessage)
+	messages.EncodeJSONAndEncrypt(&respAddNewPlayersMessage, w, admin.aesCipher)
 }
 
 func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerName, newPlayerHost string, newPlayerPort int) {
@@ -268,11 +273,14 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 			url := playerListenAddr.HTTPAddress() + "/players"
 			admin.logger.Printf("telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.String(), newPlayerName, url)
 
+			var b bytes.Buffer
+			messages.EncodeJSONAndEncrypt(&addPlayerMsg, &b, admin.aesCipher)
+
 			requestSender := utils.RequestSender{
 				Client:     admin.httpClient,
 				Method:     "POST",
 				URL:        url,
-				BodyReader: messages.MustJSONReader(&addPlayerMsg),
+				BodyReader: &b,
 			}
 
 			resp, err := requestSender.Send(ctx)
@@ -319,7 +327,8 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	admin.logger.Println("handleAckNewPlayerAdded called")
 
 	var reqBody messages.AckNewPlayerAddedMessage
-	err := json.NewDecoder(r.Body).Decode(&reqBody)
+	err := messages.DecryptAndDecodeJSON(&reqBody, r.Body, admin.aesCipher)
+
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		messages.WriteErrorPayload(w, err)
@@ -372,7 +381,8 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		admin.logger.Printf("Expecting admin state: %s, but have %s", AddingPlayers, admin.state)
 		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: Failed due to %w", errorInvalidAdminState))
-		json.NewEncoder(w).Encode(errorResponse)
+
+		messages.EncodeJSONAndEncrypt(&errorResponse, w, admin.aesCipher)
 		return
 	}
 
@@ -387,14 +397,16 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(fmt.Errorf("handleSetReady: %w, numExpectingAcks: %d", errorWaitingForAcks, numExpectingAcks))
-		json.NewEncoder(w).Encode(errorResponse)
+
+		messages.EncodeJSONAndEncrypt(&errorResponse, w, admin.aesCipher)
 		return
 	}
 
 	admin.expectedAcksList.mu.Unlock()
 
 	var setReadyMessage messages.SetReadyMessage
-	err = json.NewDecoder(r.Body).Decode(&setReadyMessage)
+	err = messages.DecryptAndDecodeJSON(&setReadyMessage, r.Body, admin.aesCipher)
+
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		messages.WriteErrorPayload(w, err)
@@ -431,12 +443,12 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err.Error())
 		errorResponse := messages.UnwrappedErrorPayload{}
 		errorResponse.Add(err)
-		json.NewEncoder(w).Encode(errorResponse)
+		messages.EncodeJSONAndEncrypt(&errorResponse, w, admin.aesCipher)
 		return
 	}
 
 	var event messages.PlayerDecisionsEvent
-	err := json.NewDecoder(r.Body).Decode(&event)
+	err := messages.DecryptAndDecodeJSON(&event, r.Body, admin.aesCipher)
 	if err != nil {
 		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -519,8 +531,15 @@ func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath s
 		playerName := playerName
 		playerAddr := playerAddr
 
+		// TODO(@rk): We're copying one bytes.Buffer to another bytes.Buffer here. Also we need to create a new bytes.Buffer every round of the loop since we're making requests concurrently.
+		var b bytes.Buffer
+		err := messages.EncodeJSONAndEncrypt(&requestStruct, &b, admin.aesCipher)
+		if err != nil {
+			admin.logger.Fatal(err)
+		}
+
 		g.Go(func() error {
-			return admin.sendMessageToPlayer(ctx, playerName, playerAddr, eventRestPath, messages.MustJSONReader(requestStruct))
+			return admin.sendMessageToPlayer(ctx, playerName, playerAddr, eventRestPath, &b)
 		})
 	}
 
@@ -722,11 +741,26 @@ func RunApp() {
 		log.Fatal(err.Error())
 	}
 
+	commonConfig, err := cmdcommon.LoadCommonConfig()
+	if err != nil {
+		log.Fatalf("failed to load common config: %v", err)
+	}
+
+	var aesCipher *uknow.AESCipher
+
+	if commonConfig.EncryptMessages {
+		aesCipher, err = uknow.NewAESCipher(commonConfig.AESKey)
+		if err != nil {
+			log.Fatalf("failed to create aes cipher: %v", err)
+		}
+	}
+
 	config := &ConfigNewAdmin{}
 	config.ListenAddr = utils.TCPAddress{Host: envConfig.ListenAddr, Port: envConfig.ListenPort}
 
 	config.Table = createStartingTable(&envConfig)
 	config.SetReadyPlayer = envConfig.SetReadyPlayer
+	config.aesCipher = aesCipher
 
 	admin := NewAdmin(config)
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 
 	"github.com/rksht/uknow"
 	"github.com/rksht/uknow/internal/utils"
@@ -116,4 +117,28 @@ func MustJSONReader(v interface{}) io.Reader {
 		log.Fatal(err)
 	}
 	return &b
+}
+
+func DecryptAndDecodeJSON(structPointer interface{}, input io.Reader, aesCipher *uknow.AESCipher) error {
+	if aesCipher == nil {
+		return json.NewDecoder(input).Decode(structPointer)
+	}
+
+	return aesCipher.MustDecryptJSON(input).Decode(structPointer)
+}
+
+func EncodeJSONAndEncrypt(inputStructPointer interface{}, output io.Writer, aesCipher *uknow.AESCipher) error {
+	if aesCipher == nil {
+		if respWriter, ok := output.(http.ResponseWriter); ok {
+			respWriter.Header().Add("Content-Type", "application/json")
+		}
+		return json.NewEncoder(output).Encode(inputStructPointer)
+	}
+
+	if respWriter, ok := output.(http.ResponseWriter); ok {
+		respWriter.Header().Add("Content-Type", "application/octet-stream")
+	}
+
+	_, err := io.Copy(output, aesCipher.MustEncryptJSON(inputStructPointer))
+	return err
 }
