@@ -84,6 +84,30 @@ const (
 	Yellow Color = 4
 )
 
+var ColorSymbol = [...]string{
+	"🌈",
+	"🔴",
+	"💚	",
+	"🔵",
+	"💛",
+}
+
+var ActionSymbol = [...]string{
+	"⊘",
+	"↺",
+	"⧺",
+	"⓪",
+	"➍",
+}
+
+func (c *Card) SymbolString() string {
+	if !c.Number.IsAction() {
+		return fmt.Sprintf("⟨%s.%s⟩", ColorSymbol[c.Color], c.Number.String())
+	}
+
+	return fmt.Sprintf("⟨%s.%s⟩", ColorSymbol[c.Color], ActionSymbol[int(c.Number)-int(NumberSkip)])
+}
+
 func (c *Color) String() string {
 	switch *c {
 	case 1:
