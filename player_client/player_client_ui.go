@@ -44,8 +44,11 @@ type ClientUIChannels struct {
 const numCardsToShowInPile = 12
 
 type ClientUI struct {
-	// stateMutex protects the uiState field. We must take care to always lock the mutexes in the order as they appear in this struct to prevent deadlocks.
-	// So if you need to access multiple parts of this struct, make sure the code path locks these in the order the mutexes appear in the struct.
+	// stateMutex protects the uiState field. We must take care to always
+	// lock the mutexes in the order as they appear in this struct to
+	// prevent deadlocks. So if you need to access multiple parts of this
+	// struct, make sure the code path locks these in the order the mutexes
+	// appear here.
 	stateMutex sync.Mutex
 	uiState    ClientUIState
 
@@ -68,8 +71,8 @@ type ClientUI struct {
 
 	commandPromptMutex      sync.Mutex
 	commandStringBeingTyped string
-	commandHistory          []string // TODO(@rk): Fix this. =)
-	commandHistoryIndex     int
+	commandHistory          *HistoryRing
+	commandHistoryPos       HistoryPos
 
 	ClientUIChannels
 
@@ -117,8 +120,8 @@ func (clientUI *ClientUI) handleCommandInput(playerName string) {
 
 		clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
 	}
-
-	clientUI.resetCommandPrompt("", true)
+	clientUI.commandHistoryPos.Push(clientUI.commandHistory, clientUI.commandStringBeingTyped)
+	clientUI.resetCommandPrompt("")
 }
 
 func (clientUI *ClientUI) appendEventLog(s string) {
@@ -166,21 +169,14 @@ func (clientUI *ClientUI) backspaceCommandPrompt() {
 	if n >= 1 {
 		clientUI.commandStringBeingTyped = clientUI.commandStringBeingTyped[0 : n-1]
 	}
-	clientUI.commandHistoryIndex = maxInt(0, len(clientUI.commandHistory)-1)
 
 	clientUI.notifyRedrawUI(uiRedraw, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", clientUI.commandStringBeingTyped)
 	})
 }
 
-// DOES NOT LOCK commandPromptMutex
-func (clientUI *ClientUI) resetCommandPrompt(text string, addCurrentTextToHistory bool) {
+func (clientUI *ClientUI) resetCommandPrompt(text string) {
 	clientUI.commandStringBeingTyped = text
-	if addCurrentTextToHistory {
-		clientUI.commandHistory = append(clientUI.commandHistory, clientUI.commandStringBeingTyped)
-		clientUI.commandHistoryIndex = len(clientUI.commandHistory) - 1
-	}
-
 	clientUI.notifyRedrawUI(uiRedraw, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", text)
 	})
@@ -276,10 +272,9 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 	clientUI.commandPromptCell = widgets.NewParagraph()
 	clientUI.commandPromptCell.Title = "Command Input"
-	clientUI.resetCommandPrompt("", false)
+	clientUI.resetCommandPrompt("")
 
-	clientUI.commandHistoryIndex = -1
-	clientUI.commandHistory = make([]string, 0, 64)
+	clientUI.commandHistory = NewHistoryRing(4)
 
 	clientUI.selfHandWidget = widgets.NewParagraph()
 	clientUI.selfHandWidget.Title = "Hand"
@@ -365,14 +360,6 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 		pileCellRows = append(pileCellRows, ui.NewRow(sizePerPileCell, pileCell))
 	}
 
-	// clientUI.grid.Set(
-	// 	ui.NewRow(0.02, clientUI.drawDeckGauge),
-	// 	ui.NewRow(0.8,
-	// 		ui.NewCol(0.3, pileCellRows...),
-	// 		ui.NewCol(0.3, clientUI.handCountChart),
-	// 		ui.NewCol(0.4, clientUI.eventLogCell)),
-	// 	ui.NewRow(0.1, ui.NewCol(0.5, clientUI.selfHandWidget), ui.NewCol(0.5, clientUI.commandPromptCell)),
-	// )
 	clientUI.grid.Set(
 		ui.NewRow(0.02, clientUI.drawDeckGauge),
 		ui.NewRow(0.8,
@@ -435,20 +422,16 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				clientUI.backspaceCommandPrompt()
 			case "<Up>":
 				clientUI.commandPromptMutex.Lock()
-				if clientUI.commandHistoryIndex >= 0 {
-					clientUI.commandStringBeingTyped = clientUI.commandHistory[clientUI.commandHistoryIndex]
-					clientUI.resetCommandPrompt(clientUI.commandStringBeingTyped, false)
-					clientUI.commandHistoryIndex--
+				prevCommand, ok := clientUI.commandHistoryPos.GetOlder(clientUI.commandHistory)
+				if ok {
+					clientUI.resetCommandPrompt(prevCommand)
 				}
 				clientUI.commandPromptMutex.Unlock()
 			case "<Down>":
 				clientUI.commandPromptMutex.Lock()
-				if clientUI.commandHistoryIndex >= 0 && clientUI.commandHistoryIndex < len(clientUI.commandHistory)-1 {
-					clientUI.commandStringBeingTyped = clientUI.commandHistory[clientUI.commandHistoryIndex]
-					clientUI.resetCommandPrompt(clientUI.commandStringBeingTyped, false)
-				}
-				if clientUI.commandHistoryIndex < len(clientUI.commandHistory)-1 {
-					clientUI.commandHistoryIndex++
+				nextCommand, ok := clientUI.commandHistoryPos.GetNewer(clientUI.commandHistory)
+				if ok {
+					clientUI.resetCommandPrompt(nextCommand)
 				}
 				clientUI.commandPromptMutex.Unlock()
 			default:
