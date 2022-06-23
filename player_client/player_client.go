@@ -404,7 +404,6 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 		c.logToWindow("It's our turn now!")
 	} else {
 		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
-		// TODO(@rk): Move to "waiting for player decision sync message from admin"
 		c.clientState = WaitingForDecisionSync
 		return
 	}

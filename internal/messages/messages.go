@@ -40,7 +40,7 @@ type AckNewPlayerAddedMessage struct {
 	NewPlayer   string `json:"new_player"`
 }
 
-// Sent my admin to all players
+// Sent by admin to all players
 type SetReadyMessage struct {
 	ShufflerName          string `json:"shuffler_name"`
 	ShufflerIsFirstPlayer bool   `json:"shuffler_is_first_player"`

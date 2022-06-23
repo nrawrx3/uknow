@@ -482,7 +482,8 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 	admin.state = SyncingPlayerDecision
 	admin.stateMutex.Unlock()
 
-	// TODO(@rk): Here we need to check table state and see if any player has won the game.
+	// TODO(@rk): Here we need to check table state and see if any player
+	// has won the game.
 
 	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
 	if err != nil {
@@ -493,8 +494,11 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 
 	admin.stateMutex.Lock()
 	admin.state = DoneSyncingPlayerDecision
+	admin.decisionEventsCompleted++
 	admin.stateMutex.Unlock()
 
+	// TODO(@rk): Don't really need to start new goroutine for new turn,
+	// although it does keep the logic separate.
 	go admin.runNewTurn()
 }
 
