@@ -14,8 +14,8 @@ type dummyCardTransferEventConsumer struct {
 	decisionEventPullChan <-chan uknow.CardTransferEvent
 }
 
-func (d *dummyCardTransferEventConsumer) RunConsumer(logger *log.Logger) {
+func (d *dummyCardTransferEventConsumer) RunConsumer(logger *log.Logger, localPlayerName string) {
 	for event := range d.decisionEventPullChan {
-		logger.Printf("DummTransferConsumer: Transfer event received: %s", event.String())
+		logger.Printf("DummTransferConsumer: Transfer event received: %s", event.String(localPlayerName))
 	}
 }

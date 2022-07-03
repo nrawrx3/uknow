@@ -65,6 +65,7 @@ var ErrUnknownKey = errors.New("unknown key")
 // Reads the hand-config JSON string and modifies the given table accordingly.
 // The table should be the returned value of NewTable(...) or
 // NewAdminTable(...), and not modified before passing it to this function.
+// TODO(@rk): Add preset discard pile.
 func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger) (*uknow.Table, error) {
 	var j map[string]interface{}
 	err := json.Unmarshal(bytes, &j)
@@ -161,6 +162,9 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 		c := table.DrawDeck.MustTop()
 		table.DrawDeck = table.DrawDeck.MustPop()
 		table.DiscardedPile = table.DiscardedPile.Push(c)
+		table.RequiredColor = c.Color
+
+		logger.Printf("hand-reader: updated required color: %s", c.Color.String())
 	}
 
 	table.IsShuffled = true

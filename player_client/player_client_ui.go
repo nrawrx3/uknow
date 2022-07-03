@@ -34,7 +34,7 @@ const maxLinesInEventLog = 50
 type ClientUIChannels struct {
 	GeneralUICommandPullChan   <-chan UICommand                    // For one-off commands and events
 	AskUserForDecisionPullChan <-chan *UICommandAskUserForDecision // Tells the UI component that it should expect decision commands from player
-	CardTransferEventPullChan  <-chan uknow.CardTransferEvent      // Consumes card transfer events
+	GameEventPullChan          <-chan uknow.GameEvent              // Consumes game events
 	// Used to print logs into the event log
 	LogWindowPullChan <-chan string
 
@@ -332,7 +332,7 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 	generalUICommandChan <-chan UICommand,
 	askUserForDecisionChan <-chan *UICommandAskUserForDecision,
 	generalReplCommandPushChan chan<- *ReplCommand,
-	cardTransferEventPullChan <-chan uknow.CardTransferEvent,
+	gameEventPullChan <-chan uknow.GameEvent,
 	logWindowChan <-chan string) {
 	if err := ui.Init(); err != nil {
 		log.Fatalf("Failed to initialized termui: %v", err)
@@ -347,7 +347,7 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 
 	clientUI.GeneralUICommandPullChan = generalUICommandChan
 	clientUI.AskUserForDecisionPullChan = askUserForDecisionChan
-	clientUI.CardTransferEventPullChan = cardTransferEventPullChan
+	clientUI.GameEventPullChan = gameEventPullChan
 	clientUI.GeneralReplCommandPushChan = generalReplCommandPushChan
 
 	clientUI.grid = ui.NewGrid()
@@ -453,9 +453,14 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				for decisionReplCommand := range clientUI.decisionReplCommandConsumerChan {
 					// Convert to PlayerDecisionEvent
 					askUserForDecisionCommand.receive <- decisionReplCommand
-					allowOneMoreDecision := <-askUserForDecisionCommand.allowOneMoreDecision
+					decisionResult := <-askUserForDecisionCommand.decisionResultChan
 
-					if !allowOneMoreDecision {
+					if decisionResult.Error != nil {
+						// CONSIDER(@rk): Does it make sense to show a bit more fancy signal in case he makes an illegal decision?
+						clientUI.appendEventLog(decisionResult.Error.Error())
+					}
+
+					if !decisionResult.AskForOneMoreDecision {
 						break
 					}
 				}
@@ -477,16 +482,22 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 	}
 }
 
-func (clientUI *ClientUI) RunCardTransferEventProcessor(localPlayerName string) {
-	for event := range clientUI.CardTransferEventPullChan {
-		clientUI.notifyRedrawUI(uiRedraw, func() {
-			clientUI.handleCardTransferEvent(event, localPlayerName)
-		})
+func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
+	for event := range clientUI.GameEventPullChan {
+		switch event := event.(type) {
+		case uknow.CardTransferEvent:
+			clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.handleCardTransferEvent(event, localPlayerName)
+			})
+
+		default:
+			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
+		}
 	}
 }
 
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
-	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(), localPlayerName))
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(localPlayerName), localPlayerName))
 
 	switch event.Source {
 	case uknow.CardTransferNodeDeck:
@@ -507,6 +518,7 @@ func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent,
 			if err != nil {
 				clientUI.appendEventLog(fmt.Sprintf("handleCardTransferEvent failed: %s", err))
 			}
+			clientUI.updatePlayerHandWidget()
 		}
 	}
 

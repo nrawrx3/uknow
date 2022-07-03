@@ -268,9 +268,10 @@ func (d Deck) MustFindCard(wantedCard Card) int {
 type TurnStateBits uint64
 
 const (
-	TurnStateStart      TurnStateBits = 1 << iota
-	TurnStateCardDrawn  TurnStateBits = 1 << iota
-	TurnStateCardPlayed TurnStateBits = 1 << iota
+	TurnStateStart           TurnStateBits = 1 << iota
+	TurnStateCardDrawn       TurnStateBits = 1 << iota
+	TurnStateCardPlayed      TurnStateBits = 1 << iota
+	TurnStateAllcardsDropped TurnStateBits = 1 << iota
 )
 
 func (stateBits TurnStateBits) HasFlag(flagBit TurnStateBits) bool {
@@ -294,13 +295,14 @@ type Table struct {
 	PlayerOfNextTurn string          `json:"player_of_next_turn"`
 	Direction        int             `json:"direction"`
 	TurnsCompleted   int             `json:"turns_completed"`
-	PlayerTurnState  TurnStateBits   `json:"turn_state_bits"`
+	PlayerTurnState  TurnStateBits   `json:"turn_state_bits"` // TODO(@rk): Why do we need this at all?
 	IsShuffled       bool            `json:"is_shuffled"`
 	RequiredColor    Color           `json:"required_color"`
 	// ^ We cannot determine elligible play card color simply from top of
 	// discard pile since wild card player enfoces a specific color for next
 	// player. This field is to be kept in sync whenever a player discards a
 	// card
+	WinnerPlayerName string
 }
 
 func NewTable(localPlayerName string, logger *log.Logger) *Table {
@@ -323,6 +325,7 @@ func (t *Table) Set(other *Table) {
 	t.PlayerOfNextTurn = other.PlayerOfNextTurn
 	t.Direction = other.Direction
 	t.IsShuffled = other.IsShuffled
+	t.RequiredColor = other.RequiredColor
 }
 
 func NewAdminTable(logger *log.Logger) *Table {
@@ -341,6 +344,7 @@ func (t *Table) Summary() string {
 	sb.WriteString(fmt.Sprintf("Shuffler: %s\n", t.ShufflerName))
 	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.PlayerOfNextTurn))
 	sb.WriteString(fmt.Sprintf("Direction: %d\n", t.Direction))
+	sb.WriteString(fmt.Sprintf("RequiredColor: %s\n", t.RequiredColor.String()))
 
 	return sb.String()
 }
@@ -500,7 +504,7 @@ func (e *PlayerDecision) String() string {
 }
 
 func (t *Table) EvalPlayerDecisionsNoTransferChan(decidingPlayer string, decisions []PlayerDecision) {
-	dummyTransferChan := make(chan CardTransferEvent)
+	dummyTransferChan := make(chan GameEvent)
 	go func() {
 		for range dummyTransferChan {
 		}
@@ -508,15 +512,29 @@ func (t *Table) EvalPlayerDecisionsNoTransferChan(decidingPlayer string, decisio
 	t.EvalPlayerDecisions(decidingPlayer, decisions, dummyTransferChan)
 }
 
-func (t *Table) EvalPlayerDecisions(decidingPlayer string, decisions []PlayerDecision, transferEventsChan chan<- CardTransferEvent) {
+func (t *Table) EvalPlayerDecisions(decidingPlayer string, decisions []PlayerDecision, gameEventPushChan chan<- GameEvent) {
 	for _, decision := range decisions {
-		t.EvalPlayerDecision(decidingPlayer, decision, transferEventsChan)
+		t.EvalPlayerDecision(decidingPlayer, decision, gameEventPushChan)
 	}
 }
 
 type EvalDecisionError struct {
 	Decision PlayerDecision
 	Reason   error
+}
+
+func (e *EvalDecisionError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Reason.Error(), e.Decision.String())
+}
+
+type IllegalPlayError struct {
+	Card           Card
+	ExpectedColor  Color
+	ExpectedNumber Number
+}
+
+func (e *IllegalPlayError) Error() string {
+	return fmt.Sprintf("Illegal play of card %s, expected color: %s, or expected number: %s", e.Card.String(), e.ExpectedColor.String(), e.ExpectedNumber.String())
 }
 
 var ErrCardNotInHand = errors.New("card not in hand")
@@ -526,15 +544,11 @@ var ErrDiscardPileIsEmpty = errors.New("discard pile is empty")
 var ErrUnknownPlayer = errors.New("unknown player")
 var ErrIllegalPlayCard = errors.New("card illegal")
 
-func (e *EvalDecisionError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Reason.Error(), e.Decision.String())
-}
-
 // TODO(@rk): Incomplete. Takes a decision event, "evaluates" the bare minimum,
 // i.e. update deck/pile/hand of the decision player and pushes the event to the
 // transferEventChan. We need to do the whole "game logic" in this function.
 // LIST THE NEXT ELIGIBLE CARDS THAT CAN BE PLAYED BY THE PLAYER
-func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecision, transferEventsChan chan<- CardTransferEvent) (PlayerDecision, error) {
+func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecision, gameEventPushChan chan<- GameEvent) (PlayerDecision, error) {
 	handOfPlayer := t.HandOfPlayer[decidingPlayer]
 
 	switch decision.Kind {
@@ -551,7 +565,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		t.HandOfPlayer[decidingPlayer] = handOfPlayer.Push(topCard)
 		t.DrawDeck = t.DrawDeck.MustPop()
 
-		transferEventsChan <- CardTransferEvent{
+		gameEventPushChan <- CardTransferEvent{
 			Source:     CardTransferNodeDeck,
 			Sink:       CardTransferNodePlayerHand,
 			SinkPlayer: decidingPlayer,
@@ -559,7 +573,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 		decision.ResultCard = topCard
-		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
+		t.SetNextPlayer(decidingPlayer)
 
 	case PlayerDecisionPullFromPile:
 		if t.PlayerTurnState.HasFlag(TurnStateCardDrawn) {
@@ -573,7 +587,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		t.HandOfPlayer[decidingPlayer] = handOfPlayer.Push(topCard)
 		t.DiscardedPile = t.DiscardedPile.MustPop()
 
-		transferEventsChan <- CardTransferEvent{
+		gameEventPushChan <- CardTransferEvent{
 			Source:     CardTransferNodePile,
 			Sink:       CardTransferNodePlayerHand,
 			SinkPlayer: decidingPlayer,
@@ -581,27 +595,30 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 		decision.ResultCard = topCard
-		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardDrawn)
+		t.SetNextPlayer(decidingPlayer)
 
 	case PlayerDecisionPlayHandCard:
-		t.TryPlayCard(decidingPlayer, decision.ResultCard, transferEventsChan)
+		return t.TryPlayCard(decidingPlayer, decision.ResultCard, gameEventPushChan)
 	}
-
-	// TODO(@rk): This also depends on the logic. Simply moving to next player
-	playerIndex := t.PlayerIndexFromName(decidingPlayer)
-	nextPlayerIndex := t.GetNextPlayerIndex(playerIndex, t.Direction)
-	t.PlayerOfNextTurn = t.PlayerNames[nextPlayerIndex]
-	t.PlayerTurnState = TurnStateStart
 
 	t.Logger.Printf("Evaluated decision: %s\n\tfrom player: %s,\n\tplayer of next turn: %s", decision.String(), decidingPlayer, t.PlayerOfNextTurn)
 
 	return decision, nil
 }
 
+func (t *Table) SetNextPlayer(playerName string) {
+	playerIndex := t.PlayerIndexFromName(playerName)
+	nextPlayerIndex := t.GetNextPlayerIndex(playerIndex, t.Direction)
+	t.PlayerOfNextTurn = t.PlayerNames[nextPlayerIndex]
+	t.PlayerTurnState = TurnStateStart
+
+	t.Logger.Printf("Setting next player: %s, current player: %s", t.PlayerOfNextTurn, playerName)
+}
+
 // TODO(@rk): Evaluate the played card, emitting more transfer events and deciding NextPlayerToDraw
 
 // CONSIDER(@rk): For replay events, we shouldn't need to check rules.
-func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsChan chan<- CardTransferEvent) error {
+func (t *Table) TryPlayCard(decidingPlayer string, cardToPlay Card, gameEventPushChan chan<- GameEvent) (PlayerDecision, error) {
 	// This procedure's precondition is that it was indeed the player's turn. Given that, it checks if the play is valid
 	decision := PlayerDecision{
 		Kind:       PlayerDecisionPlayHandCard,
@@ -609,17 +626,17 @@ func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsCh
 	}
 
 	// cardToPlay must come from hand
-	playerHand, ok := t.HandOfPlayer[playerName]
+	playerHand, ok := t.HandOfPlayer[decidingPlayer]
 	if !ok {
-		return &EvalDecisionError{
+		return decision, &EvalDecisionError{
 			Decision: decision,
-			Reason:   fmt.Errorf("%w: %s", ErrUnknownPlayer, playerName),
+			Reason:   fmt.Errorf("%w: %s", ErrUnknownPlayer, decidingPlayer),
 		}
 	}
 
 	_, err := playerHand.FindCard(cardToPlay)
 	if err != nil {
-		return &EvalDecisionError{
+		return decision, &EvalDecisionError{
 			Decision: decision,
 			Reason:   ErrCardNotInHand,
 		}
@@ -635,31 +652,75 @@ func (t *Table) TryPlayCard(playerName string, cardToPlay Card, transferEventsCh
 	colorMatches := t.RequiredColor == cardToPlay.Color
 
 	if !numberMatches && !colorMatches {
-		return &EvalDecisionError{
+		t.Logger.Printf("CANNOT play card: %s", cardToPlay.String())
+
+		return decision, &EvalDecisionError{
 			Decision: decision,
-			Reason: fmt.Errorf("%w: %s, (color should be: %s OR number should be %s)",
-				ErrIllegalPlayCard,
-				cardToPlay.String(),
-				t.RequiredColor.String(),
-				topOfPile.Number.String(),
-			),
+			Reason: &IllegalPlayError{
+				Card:           cardToPlay,
+				ExpectedColor:  t.RequiredColor,
+				ExpectedNumber: topOfPile.Number,
+			},
 		}
 	}
 
 	// Can play card
 
 	// Remove card from hand and put it on pile
-	hand := t.HandOfPlayer[playerName]
+	hand := t.HandOfPlayer[decidingPlayer]
 	cardLoc := hand.MustFindCard(cardToPlay)
 	hand = append(hand[0:cardLoc], hand[cardLoc+1:]...)
-	t.HandOfPlayer[playerName] = hand
+	t.HandOfPlayer[decidingPlayer] = hand
 	t.DiscardedPile = t.DiscardedPile.Push(cardToPlay)
 
-	transferEventsChan <- CardTransferEvent{
+	gameEventPushChan <- CardTransferEvent{
 		Source:       CardTransferNodePlayerHand,
 		Sink:         CardTransferNodePile,
-		SourcePlayer: playerName,
+		SourcePlayer: decidingPlayer,
+		Card:         cardToPlay,
 	}
 
-	return nil
+	t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardPlayed)
+
+	// TODO(@rk): If card player's hand is empty, switch to win state - some ideas around it. Think later.
+
+	if t.HandOfPlayer[decidingPlayer].Len() == 0 {
+		t.WinnerPlayerName = decidingPlayer
+		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateAllcardsDropped)
+	}
+
+	// TODO(@rk): Evaluate the played card, instead of just moving to next player turn!
+
+	if cardToPlay.Number.IsAction() {
+		t.EvalPlayedActionCard(decidingPlayer, cardToPlay, gameEventPushChan)
+	} else {
+		t.SetNextPlayer(decidingPlayer)
+	}
+
+	return decision, nil
+}
+
+func (t *Table) EvalPlayedActionCard(decidingPlayer string, actionCard Card, gameEventPushChan chan<- GameEvent) {
+	switch actionCard.Number {
+	case NumberSkip:
+		curPlayerIndex := t.IndexOfPlayer[decidingPlayer]
+		skippedPlayerIndex := t.GetNextPlayerIndex(curPlayerIndex, t.Direction)
+		skippedPlayer := t.PlayerNames[skippedPlayerIndex]
+		nextPlayerIndex := t.GetNextPlayerIndex(skippedPlayerIndex, t.Direction)
+		nextPlayer := t.PlayerNames[nextPlayerIndex]
+
+		event := SkipCardActionEvent{
+			Player:        decidingPlayer,
+			SkippedPlayer: skippedPlayer,
+			NextPlayer:    nextPlayer,
+		}
+
+		t.Logger.Printf("evaluated skip card action: %s", event.StringMessage(t.LocalPlayerName))
+
+		gameEventPushChan <- event
+
+	default:
+		// TODO(@rk): Implement for remaining action cards
+		t.Logger.Panicf("failed to eval action card %s, not implemented", actionCard.String())
+	}
 }

@@ -48,7 +48,7 @@ type ClientChannels struct {
 	AskUserForDecisionPushChan     chan<- *UICommandAskUserForDecision
 	NonDecisionReplCommandPullChan <-chan *ReplCommand
 	LogWindowPushChan              chan<- string
-	CardTransferEventPushChan      chan<- uknow.CardTransferEvent
+	GameEventPushChan              chan<- uknow.GameEvent
 }
 type PlayerClient struct {
 	// Used to protect the non-gui state
@@ -118,7 +118,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
 	go (&dummyCardTransferEventConsumer{
 		decisionEventPullChan: DummyCardTransferEventConsumerChan,
-	}).RunConsumer(c.Logger)
+	}).RunConsumer(c.Logger, c.table.LocalPlayerName)
 
 	return c
 }
@@ -420,13 +420,13 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	// c.logToWindow(c.table.Summary())
 
 	receiveReplCommandsChan := make(chan *ReplCommand)
-	allowOneMoreDecision := make(chan bool)
+	askUserForDecisionResultChan := make(chan AskUserForDecisionResult)
 
 	askCommand := &UICommandAskUserForDecision{
-		receive:              receiveReplCommandsChan,
-		allowOneMoreDecision: allowOneMoreDecision,
-		timeout:              10 * time.Second, // TODO(@rk): Unused and arbitrary. Think later.
-		sender:               "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
+		receive:            receiveReplCommandsChan,
+		decisionResultChan: askUserForDecisionResultChan,
+		timeout:            10 * time.Second, // TODO(@rk): Unused and arbitrary. Think later.
+		sender:             "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
 	}
 
 	c.AskUserForDecisionPushChan <- askCommand
@@ -439,7 +439,12 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		decision, err := c.evalReplCommandOnTable(replCommand)
 
 		if err != nil {
-			c.Logger.Fatalf("evalReplCommandOnTable failed: %s", err.Error())
+			c.Logger.Printf("evalReplCommandOnTable failed: %s", err.Error())
+			askUserForDecisionResultChan <- AskUserForDecisionResult{
+				Error:                 err,
+				AskForOneMoreDecision: true, // CONSIDER(@rk): Perhaps we only allow a certain number of retries?
+			}
+			continue
 		}
 
 		c.Logger.Printf("Received replCommand: %s, decisionEvent: %s", replCommand.Kind.String(), &decision)
@@ -448,9 +453,9 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 
 		// TODO(@rk): Uncomment. After proper game logic is implemented.
 		// allowOneMoreDecision <- c.table.NextPlayerToDraw == c.table.LocalPlayerName
-
-		// TODO(@rk): Remove. See above.
-		allowOneMoreDecision <- false
+		askUserForDecisionResultChan <- AskUserForDecisionResult{
+			AskForOneMoreDecision: false,
+		}
 	}
 
 	c.Logger.Printf("Done receiving player decision events from ClientUI")
@@ -520,7 +525,7 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 
 	// Eval decisions of other player
 	c.Logger.Printf("Evaluating player %s's decisions: %+v", decisionsEvent.PlayerName, decisionsEvent)
-	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, c.CardTransferEventPushChan)
+	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, c.GameEventPushChan)
 
 	c.clientState = WaitingForAdminToChoosePlayer
 }
@@ -533,20 +538,20 @@ func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.P
 			ResultCard: replCommand.Cards[0],
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.GameEventPushChan)
 
 	case CmdDrawCard:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.GameEventPushChan)
 
 	case CmdDrawCardFromPile:
 		decisionEvent := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.GameEventPushChan)
 
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())

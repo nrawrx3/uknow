@@ -29,7 +29,7 @@ type CommChannels struct {
 	LogWindowChan chan string
 
 	// The PlayerClient sends card transfer events on this channel after executing game logic. The PlayerClientUI receives these and updates the UI.
-	CardTransferEventChan chan uknow.CardTransferEvent
+	GameEventChan chan uknow.GameEvent
 }
 
 func MakeCommChannels() CommChannels {
@@ -38,6 +38,6 @@ func MakeCommChannels() CommChannels {
 	chans.AskUIForUserTurnChan = make(chan *UICommandAskUserForDecision)
 	chans.NonDecisionReplCommandsChan = make(chan *ReplCommand)
 	chans.LogWindowChan = make(chan string, 64) // Logging to ui window doesn't have to be synchronous
-	chans.CardTransferEventChan = make(chan uknow.CardTransferEvent)
+	chans.GameEventChan = make(chan uknow.GameEvent)
 	return chans
 }
