@@ -94,7 +94,7 @@ func ParseCommandFromInput(input string, playerName string) (*ReplCommand, error
 	}
 
 	if tok != scanner.EOF {
-		return command, errors.New("Expected EOF during parsing command")
+		return command, errors.New("expected EOF during parsing command")
 	}
 
 	// log.Printf("Parsed command: %s", command.Kind)
@@ -140,7 +140,7 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.Kind = CmdDropCard
 		tok := s.Scan()
 		if !(tok == scanner.Int || tok == scanner.Ident) {
-			return tok, command, fmt.Errorf("Expected a number (0-9) or action name (skip|rev|draw2|wild|wild4), found: '%s'", s.TokenText())
+			return tok, command, fmt.Errorf("expected a number (0-9) or action name (skip|rev|draw2|wild|wild4), found: '%s'", s.TokenText())
 		}
 
 		cards := command.Cards
@@ -159,12 +159,17 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.Kind = CmdChallenge
 		tok = s.Scan()
 		if tok != scanner.Ident {
-			return tok, command, fmt.Errorf("Expected name of person to challenge")
+			return tok, command, fmt.Errorf("expected name of person to challenge")
 		}
 		command.TargetPlayerName = s.TokenText()
 		return s.Scan(), command, nil
 
 	case "connect_default":
+		command.Kind = CmdConnect
+		command.ExtraData = nil
+		return s.Scan(), command, nil
+
+	case "conndef":
 		command.Kind = CmdConnect
 		command.ExtraData = nil
 		return s.Scan(), command, nil
@@ -178,7 +183,7 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		return s.Scan(), command, nil
 
 	default:
-		return tok, command, fmt.Errorf("Expected a main-command (draw|drop|quit|challenge), found '%s'", s.TokenText())
+		return tok, command, fmt.Errorf("expected a main-command (draw|drop|quit|challenge), found '%s'", s.TokenText())
 	}
 }
 
@@ -202,7 +207,7 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 			return 0, cards, err
 		}
 		if number < 0 || number > 9 {
-			return 0, cards, fmt.Errorf("Invalid card number: %d", number)
+			return 0, cards, fmt.Errorf("invalid card number: %d", number)
 		}
 		card.Number, err = uknow.IntToNumber(number)
 		if err != nil {
@@ -222,7 +227,7 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 
 	tok := s.Scan()
 	if tok != scanner.Ident {
-		return tok, cards, fmt.Errorf("Expected a card color (red|green|blue|yellow). Got '%s'", s.TokenText())
+		return tok, cards, fmt.Errorf("expected a card color (red|green|blue|yellow). Got '%s'", s.TokenText())
 	}
 	switch strings.ToLower(s.TokenText()) {
 	case "red":
@@ -234,7 +239,7 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 	case "yellow":
 		card.Color = uknow.Yellow
 	default:
-		return tok, cards, fmt.Errorf("Expected a card color (red|green|blue|yellow). Got '%s'", s.TokenText())
+		return tok, cards, fmt.Errorf("expected a card color (red|green|blue|yellow). Got '%s'", s.TokenText())
 	}
 	cards = append(cards, card)
 
@@ -247,12 +252,12 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 
 // Connect command is of the form: connect adminAddr
 func parseConnectCommand(input string, playerName string) (*ReplCommand, error) {
-	re := regexp.MustCompile("^connect\\s+(?P<adminAddr>.+)$")
+	re := regexp.MustCompile(`^connect\\s+(?P<adminAddr>.+)$`)
 	input = strings.TrimSpace(input)
 
 	matches := re.FindStringSubmatch(input)
 	if matches == nil {
-		return &ReplCommand{}, errors.New("Expected a `connect <address>` command")
+		return &ReplCommand{}, errors.New("expected a `connect <address>` command")
 	}
 	adminAddrIndex := re.SubexpIndex("adminAddr")
 	adminAddr := matches[adminAddrIndex]

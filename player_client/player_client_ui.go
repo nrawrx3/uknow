@@ -309,7 +309,10 @@ func uiColorOfCard(color uknow.Color) ui.Color {
 
 func (clientUI *ClientUI) initDiscardPileCells(table *uknow.Table) {
 	clientUI.discardPile = table.DiscardedPile.Clone()
+	clientUI.refreshDiscardPileCells()
+}
 
+func (clientUI *ClientUI) refreshDiscardPileCells() {
 	low := len(clientUI.discardPile) - numCardsToShowInPile
 	if low < 0 {
 		low = 0
@@ -497,7 +500,7 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 }
 
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
-	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(localPlayerName), localPlayerName))
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s, card: %s", event.String(localPlayerName), localPlayerName, event.Card.String()))
 
 	switch event.Source {
 	case uknow.CardTransferNodeDeck:
@@ -529,6 +532,7 @@ func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent,
 		clientUI.drawDeckGauge.Percent += 1
 	case uknow.CardTransferNodePile:
 		clientUI.discardPile = clientUI.discardPile.Push(event.Card)
+		clientUI.refreshDiscardPileCells()
 	case uknow.CardTransferNodePlayerHand:
 		clientUI.addToHandCountChart(event.SinkPlayer, 1)
 		if localPlayerName == event.SinkPlayer {
