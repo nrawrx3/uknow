@@ -41,6 +41,11 @@ import (
 		"discarded_pile_size": 16,
 		"shuffle_seed": 0 // 0 says don't shuffle before distributing,
 		"player_of_next_turn": "alice" // which player's turn it is on starting
+		"preset_discard_pile_top": [ // top to bottom
+			["red", 9],
+			["red", "skip"],
+			["wild_draw_4"]
+		]
 	}
 */
 
@@ -54,13 +59,15 @@ type handDesc struct {
 }
 
 type serializedJSON struct {
-	handDescOfPlayer  map[string]*handDesc
-	discardedPileSize int
-	playerToDraw      string
+	handDescOfPlayer     map[string]*handDesc
+	discardedPileSize    int
+	playerToDraw         string
+	presetDiscardPileTop uknow.Deck
 }
 
 var ErrLocalPlayerNameNotDescribed = errors.New("local player name is not in hand-desc map")
 var ErrUnknownKey = errors.New("unknown key")
+var ErrUnexpectedJSONType = errors.New("unexpected JSON type")
 
 // Reads the hand-config JSON string and modifies the given table accordingly.
 // The table should be the returned value of NewTable(...) or
@@ -76,6 +83,7 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 	handDescOf := make(map[string]*handDesc)
 	discardedPileSize := 0
 	playerOfNextTurn := ""
+	presetDiscardPileTop := make(uknow.Deck, 0)
 
 	for key, value := range j {
 		if strings.HasPrefix(key, "player.") {
@@ -96,15 +104,21 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 			rand.Seed(int64(value.(float64)))
 		} else if key == "player_of_next_turn" {
 			playerOfNextTurn = strings.TrimSpace(value.(string))
+		} else if key == "preset_discard_pile_top" {
+			presetDiscardPileTop, err = parsePresetDiscardPileTop(value)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			return nil, fmt.Errorf("%w: %s", ErrUnknownKey, key)
 		}
 	}
 
 	serializedJSON := serializedJSON{
-		handDescOfPlayer:  handDescOf,
-		discardedPileSize: discardedPileSize,
-		playerToDraw:      playerOfNextTurn,
+		handDescOfPlayer:     handDescOf,
+		discardedPileSize:    discardedPileSize,
+		playerToDraw:         playerOfNextTurn,
+		presetDiscardPileTop: presetDiscardPileTop,
 	}
 
 	return makeTable(serializedJSON, initializedTable, logger)
@@ -131,6 +145,14 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 		countOfCard[card.EncodeUint32()] += 1
 	}
 
+	// Create the preset discard pile first
+	err := removeCardsFromDeck(serializedJSON.presetDiscardPileTop, countOfCard)
+	if err != nil {
+		return table, fmt.Errorf("%w: invalid card setup in preset_discard_pile_top", err)
+	}
+	table.DiscardedPile = table.DiscardedPile.Push(serializedJSON.presetDiscardPileTop...)
+
+	// Assign cards to each player hand from the remaining cards
 	for playerName, handDesc := range serializedJSON.handDescOfPlayer {
 		err := table.AddPlayer(playerName)
 		if err != nil {
@@ -149,7 +171,7 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 		}
 	}
 
-	// create new DrawDeck with the cards removed
+	// create new DrawDeck with the remaining cards.
 	newDrawDeck := uknow.NewEmptyDeck()
 	for encodedCard, count := range countOfCard {
 		for i := 0; i < count; i++ {
@@ -158,15 +180,21 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 	}
 	table.DrawDeck = newDrawDeck
 
-	for i := 0; i < serializedJSON.discardedPileSize; i++ {
-		c := table.DrawDeck.MustTop()
-		table.DrawDeck = table.DrawDeck.MustPop()
-		table.DiscardedPile = table.DiscardedPile.Push(c)
-		table.RequiredColor = c.Color
+	// If discarded pile size is more than the number of cards added by preset discard pile top, add them.
+	remainingDiscardPileSize := serializedJSON.discardedPileSize - table.DiscardedPile.Len()
+	if remainingDiscardPileSize > 0 {
+		remainingDiscardPile := uknow.NewEmptyDeck()
+		for i := 0; i < remainingDiscardPileSize; i++ {
+			c := table.DrawDeck.MustTop()
+			table.DrawDeck = table.DrawDeck.MustPop()
+			remainingDiscardPile = remainingDiscardPile.Push(c)
+			table.DrawDeck = table.DrawDeck.MustPop()
+		}
 
-		logger.Printf("hand-reader: updated required color: %s", c.Color.String())
+		table.DiscardedPile = append(remainingDiscardPile, table.DiscardedPile...)
 	}
 
+	table.RequiredColor = table.DiscardedPile.MustTop().Color
 	table.IsShuffled = true
 	table.PlayerOfNextTurn = serializedJSON.playerToDraw
 	table.PlayerTurnState = uknow.TurnStateStart
@@ -296,4 +324,94 @@ func castDrawUpto(v interface{}) (drawUpto, error) {
 		}
 	}
 	return drawUpto, nil
+}
+
+func parsePresetDiscardPileTop(value interface{}) (uknow.Deck, error) {
+	array, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%w: expected an array for key preset_discard_pile_top", ErrUnexpectedJSONType)
+	}
+
+	presetPileTop := make(uknow.Deck, 0, len(array))
+
+	for i, cardDesc := range array {
+		tupleCardDesc, ok := cardDesc.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("%w: expected an array describing a single card for the preset_discard_pile_top array item at index: %d", ErrUnexpectedJSONType, i)
+		}
+
+		var card uknow.Card
+
+		switch len(tupleCardDesc) {
+		case 1:
+			// Wild card
+			wildCardName, ok := tupleCardDesc[0].(string)
+			if !ok || (wildCardName != "wild" && wildCardName != "wild_draw_4") {
+				return nil, fmt.Errorf("%w: expected either wild or wild_draw_4 string for preset_discard_pile_top array item at index: %d", ErrUnexpectedJSONType, i)
+			}
+			switch wildCardName {
+			case "wild":
+				card = uknow.Card{
+					Number: uknow.NumberWild,
+					Color:  uknow.Wild,
+				}
+			case "wild_draw_4":
+				card = uknow.Card{
+					Number: uknow.NumberWildDrawFour,
+					Color:  uknow.Wild,
+				}
+			}
+
+		case 2:
+			// Non wild card
+			colorName, ok := tupleCardDesc[0].(string)
+			if !ok || (colorName != "red" && colorName != "blue" && colorName != "yellow" && colorName != "green") {
+				return nil, fmt.Errorf("%w: expected a color name as first array element for preset_discard_pile_top array item at index: %d", ErrUnexpectedJSONType, i)
+			}
+
+			switch colorName {
+			case "red":
+				card.Color = uknow.Red
+			case "blue":
+				card.Color = uknow.Blue
+			case "yellow":
+				card.Color = uknow.Yellow
+			case "green":
+				card.Color = uknow.Green
+			}
+
+			switch number := tupleCardDesc[1].(type) {
+			case float64:
+				if 0 <= number && number <= 9 {
+					card.Number = uknow.Number(number)
+				} else {
+					return nil, fmt.Errorf("invalid number for card description for preset_discard_pile_top array item at index: %d", i)
+				}
+			case string:
+				switch number {
+				case "skip":
+					card.Number = uknow.NumberSkip
+				case "reverse":
+					card.Number = uknow.NumberReverse
+				case "draw_2":
+					card.Number = uknow.NumberDrawTwo
+				default:
+					return nil, fmt.Errorf("invalid number for card description for preset_discard_pile_top array item at index: %d", i)
+				}
+			default:
+				return nil, fmt.Errorf("%w: expected an integer or a string as card number for preset_discard_pile_top array item at index : %d", ErrUnexpectedJSONType, i)
+			}
+
+		default:
+			return nil, fmt.Errorf("expected a tuple of size 1 or 2 for describing a card for preset_discard_pile_top array item at index: %d", i)
+		}
+
+		presetPileTop = presetPileTop.Push(card)
+	}
+
+	// Reverse because the cards are arranged in the array in top to bottom order
+	for i, j := 0, len(presetPileTop)-1; i < j; i, j = i+1, j-1 {
+		presetPileTop[i], presetPileTop[j] = presetPileTop[j], presetPileTop[i]
+	}
+	return presetPileTop, nil
 }

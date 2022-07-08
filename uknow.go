@@ -336,7 +336,7 @@ func (t *Table) Summary() string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("DrawDeck count: %d\n", t.DrawDeck.Len()))
-	sb.WriteString(fmt.Sprintf("Pile count: %d\n", t.DiscardedPile.Len()))
+	sb.WriteString(fmt.Sprintf("DiscardedPile count: %d\n", t.DiscardedPile.Len()))
 	sb.WriteString("Hand counts, Index:\n----------\n")
 	for playerName, hand := range t.HandOfPlayer {
 		sb.WriteString(fmt.Sprintf("%s: %d, %d\n", playerName, hand.Len(), t.IndexOfPlayer[playerName]))
@@ -345,6 +345,13 @@ func (t *Table) Summary() string {
 	sb.WriteString(fmt.Sprintf("NextPlayerToDraw: %s\n", t.PlayerOfNextTurn))
 	sb.WriteString(fmt.Sprintf("Direction: %d\n", t.Direction))
 	sb.WriteString(fmt.Sprintf("RequiredColor: %s\n", t.RequiredColor.String()))
+
+	sb.WriteString("Discard pile top:\n----------\n")
+	for i, count := len(t.DiscardedPile)-1, 0; i >= 0 && count <= 5; i, count = i-1, count+1 {
+		sb.WriteString(t.DiscardedPile[i].String())
+		sb.WriteRune('\n')
+	}
+	sb.WriteRune('\n')
 
 	return sb.String()
 }
@@ -410,14 +417,14 @@ func (t *Table) PlayerIndexFromName(playerName string) int {
 		}
 	}
 
-	panic(fmt.Errorf("Non-existent player name: '%s'", playerName))
+	panic(fmt.Errorf("non-existent player name: '%s'", playerName))
 }
 
 func (t *Table) SetIndexOfPlayer(indexOfPlayer map[string]int) error {
 	for playerName, index := range indexOfPlayer {
 		_, exists := t.IndexOfPlayer[playerName]
 		if !exists {
-			return fmt.Errorf("Player %s does not exist in table", playerName)
+			return fmt.Errorf("player %s does not exist in table", playerName)
 		}
 		t.IndexOfPlayer[playerName] = index
 		t.PlayerNames[index] = playerName
