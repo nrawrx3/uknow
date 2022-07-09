@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
+	"os"
 	"strings"
 
 	"github.com/rksht/uknow"
@@ -122,6 +124,19 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 	}
 
 	return makeTable(serializedJSON, initializedTable, logger)
+}
+
+func LoadConfigFromFile(filepath string, initializedTable *uknow.Table, logger *log.Logger) (*uknow.Table, error) {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("could not load hand config from file: %w", err)
+	}
+
+	bytes, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("could not load hand config from file: %w", err)
+	}
+	return LoadConfig(bytes, initializedTable, logger)
 }
 
 var ErrCouldNotRemoveCard = errors.New("could not remove card")

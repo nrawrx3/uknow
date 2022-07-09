@@ -134,7 +134,7 @@ func (a *Admin) Restart() {
 	a.stateMutex.Lock()
 	defer a.stateMutex.Unlock()
 
-	a.table = uknow.NewAdminTable(a.table.Logger)
+	a.table = createStartingTable(&envConfig)
 
 	a.logger = uknow.CreateFileLogger(false, logFilePrefix)
 
@@ -710,12 +710,15 @@ func (admin *Admin) RunREPL() {
 func createStartingTable(c *EnvConfig) *uknow.Table {
 	tableLogger := uknow.CreateFileLogger(false, "table_admin")
 	table := uknow.NewAdminTable(tableLogger)
+	var err error
 
-	if c.DebugStartingHandConfigJSON == "" {
+	if c.DebugStartingHandConfigFile != "" {
+		table, err = hand_reader.LoadConfigFromFile(c.DebugStartingHandConfigFile, table, tableLogger)
+	} else if c.DebugStartingHandConfigJSON != "" {
+		table, err = hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
+	} else {
 		return table
 	}
-
-	table, err := hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
 
 	if err != nil {
 		log.Fatalf("failed to load hand-config: %s", err)
