@@ -564,19 +564,9 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrAlreadyDrewCard}
 		}
 
-		topCard, err := t.DrawDeck.Top()
+		topCard, err := t.PullCardFromDeckToPlayerHand(decidingPlayer, gameEventPushChan)
 		if err != nil {
-			return decision, &EvalDecisionError{Decision: decision, Reason: ErrDrawDeckIsEmpty}
-		}
-
-		t.HandOfPlayer[decidingPlayer] = handOfPlayer.Push(topCard)
-		t.DrawDeck = t.DrawDeck.MustPop()
-
-		gameEventPushChan <- CardTransferEvent{
-			Source:     CardTransferNodeDeck,
-			Sink:       CardTransferNodePlayerHand,
-			SinkPlayer: decidingPlayer,
-			Card:       topCard,
+			return decision, &EvalDecisionError{Decision: decision, Reason: err}
 		}
 
 		decision.ResultCard = topCard
@@ -688,6 +678,7 @@ func (t *Table) TryPlayCard(decidingPlayer string, cardToPlay Card, gameEventPus
 	}
 
 	t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateCardPlayed)
+	t.RequiredColor = cardToPlay.Color // Handle case of wild card in its corresponding eval function
 
 	// TODO(@rk): If card player's hand is empty, switch to win state - some ideas around it. Think later.
 
@@ -695,8 +686,6 @@ func (t *Table) TryPlayCard(decidingPlayer string, cardToPlay Card, gameEventPus
 		t.WinnerPlayerName = decidingPlayer
 		t.PlayerTurnState = t.PlayerTurnState.SetFlag(TurnStateAllcardsDropped)
 	}
-
-	// TODO(@rk): Evaluate the played card, instead of just moving to next player turn!
 
 	if cardToPlay.Number.IsAction() {
 		t.EvalPlayedActionCard(decidingPlayer, cardToPlay, gameEventPushChan)
@@ -726,8 +715,74 @@ func (t *Table) EvalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 
 		gameEventPushChan <- event
 
+	case NumberDrawTwo:
+		curPlayerIndex := t.IndexOfPlayer[decidingPlayer]
+		skippedPlayerIndex := t.GetNextPlayerIndex(curPlayerIndex, t.Direction)
+		skippedPlayer := t.PlayerNames[skippedPlayerIndex]
+		nextPlayerIndex := t.GetNextPlayerIndex(skippedPlayerIndex, t.Direction)
+		nextPlayer := t.PlayerNames[nextPlayerIndex]
+
+		event := DrawTwoCardActionEvent{
+			Player:        decidingPlayer,
+			SkippedPlayer: skippedPlayer,
+			NextPlayer:    nextPlayer,
+		}
+
+		for i := 0; i < 2; i++ {
+			_, err := t.PullCardFromDeckToPlayerHand(skippedPlayer, gameEventPushChan)
+
+			if err != nil {
+				t.Logger.Printf("failed to pull card from deck to hand of player %s as part of draw2 action: %v", skippedPlayer, err)
+				return
+			}
+		}
+
+		t.Logger.Printf("evaluated draw2 card action: %s", event.StringMessage(t.LocalPlayerName))
+
+		gameEventPushChan <- event
+
+	case NumberReverse:
+		curPlayerIndex := t.IndexOfPlayer[decidingPlayer]
+		skippedPlayerIndex := t.GetNextPlayerIndex(curPlayerIndex, t.Direction)
+
+		// CONSIDER(@rk): Should reverse card for 2 player game act like
+		// skip card instead?
+		t.Direction = -1 * t.Direction
+		nextPlayerIndex := t.GetNextPlayerIndex(curPlayerIndex, t.Direction)
+		nextPlayer := t.PlayerNames[nextPlayerIndex]
+		skippedPlayer := t.PlayerNames[skippedPlayerIndex]
+
+		event := ReverseCardActionEvent{
+			Player:        decidingPlayer,
+			SkippedPlayer: skippedPlayer,
+			NextPlayer:    nextPlayer,
+		}
+
+		t.Logger.Printf("evaluated reverse card action: %s", event.StringMessage(t.LocalPlayerName))
+
+		gameEventPushChan <- event
+
 	default:
 		// TODO(@rk): Implement for remaining action cards
 		t.Logger.Panicf("failed to eval action card %s, not implemented", actionCard.String())
 	}
+}
+
+// Pull top card from draw deck and put it in target player's hand. Returns the card pulled.
+func (t *Table) PullCardFromDeckToPlayerHand(targetPlayer string, gameEventPushChan chan<- GameEvent) (Card, error) {
+	topCard, err := t.DrawDeck.Top()
+	if err != nil {
+		return topCard, ErrDrawDeckIsEmpty
+	}
+
+	t.HandOfPlayer[targetPlayer] = t.HandOfPlayer[targetPlayer].Push(topCard)
+	t.DrawDeck = t.DrawDeck.MustPop()
+
+	gameEventPushChan <- CardTransferEvent{
+		Source:     CardTransferNodeDeck,
+		Sink:       CardTransferNodePlayerHand,
+		SinkPlayer: targetPlayer,
+		Card:       topCard,
+	}
+	return topCard, nil
 }
