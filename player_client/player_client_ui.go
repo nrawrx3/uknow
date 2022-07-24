@@ -43,6 +43,8 @@ type ClientUIChannels struct {
 
 const numCardsToShowInPile = 12
 
+const defaultCommandPromptCellTitle = "Not your turn (only info commands allowed)"
+
 type ClientUI struct {
 	// stateMutex protects the uiState field. We must take care to always
 	// lock the mutexes in the order as they appear in this struct to
@@ -271,7 +273,8 @@ func (clientUI *ClientUI) initWidgetObjects() {
 	clientUI.eventLogLines = make([]string, 0, 5120)
 
 	clientUI.commandPromptCell = widgets.NewParagraph()
-	clientUI.commandPromptCell.Title = "Command Input"
+	clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+	clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
 	clientUI.resetCommandPrompt("")
 
 	clientUI.commandHistory = NewHistoryRing(4)
@@ -293,15 +296,15 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 func uiColorOfCard(color uknow.Color) ui.Color {
 	switch color {
-	case uknow.Blue:
+	case uknow.ColorBlue:
 		return ui.ColorBlue
-	case uknow.Red:
+	case uknow.ColorRed:
 		return ui.ColorRed
-	case uknow.Green:
+	case uknow.ColorGreen:
 		return ui.ColorGreen
-	case uknow.Yellow:
+	case uknow.ColorYellow:
 		return ui.ColorYellow
-	case uknow.Wild:
+	case uknow.ColorWild:
 		return ui.ColorMagenta
 	}
 	panic(fmt.Sprintf("Unexpected Color value: %d", color))
@@ -445,14 +448,31 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 			}
 
 		case askUserForDecisionCommand := <-clientUI.AskUserForDecisionPullChan:
-			// TODO(@rk): We should show some kind of signal in UI denoting that "it's now the local players turn"
 			clientUI.appendEventLog("It's your turn! Time to make decision")
 
 			clientUI.stateMutex.Lock()
 			clientUI.uiState = ClientUIAllowPlayerDecisionReplCommands
 			clientUI.stateMutex.Unlock()
 
+			// Change the UI style a bit to make it obvious it's the local player's turn
+			clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorBlue
+				clientUI.commandPromptCell.TextStyle.Fg = ui.ColorBlue
+				clientUI.drawDeckGauge.BarColor = ui.ColorBlue
+				clientUI.commandPromptCell.Title = "Your turn now"
+			})
+
 			go func() {
+				if askUserForDecisionCommand.LocalPlayerCanChallenge() {
+					clientUI.notifyRedrawUI(uiRedraw, func() {
+						clientUI.commandPromptCell.Title = fmt.Sprintf("challenge or no_challenge %s?", askUserForDecisionCommand.challengeablePlayer)
+					})
+
+					defer func() {
+						clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+					}()
+				}
+
 				for decisionReplCommand := range clientUI.decisionReplCommandConsumerChan {
 					// Convert to PlayerDecisionEvent
 					askUserForDecisionCommand.receive <- decisionReplCommand
@@ -460,23 +480,43 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 
 					if decisionResult.Error != nil {
 						// CONSIDER(@rk): Does it make sense to show a bit more fancy signal in case he makes an illegal decision?
+
+						go func() {
+							clientUI.notifyRedrawUI(uiRedraw, func() {
+								clientUI.drawDeckGauge.BarColor = ui.ColorRed
+								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorRed
+
+							})
+							<-time.After(2 * time.Second)
+							clientUI.notifyRedrawUI(uiRedraw, func() {
+								clientUI.drawDeckGauge.BarColor = ui.ColorBlue
+								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorWhite
+							})
+						}()
 						clientUI.appendEventLog(decisionResult.Error.Error())
 					}
 
 					if !decisionResult.AskForOneMoreDecision {
 						break
 					}
+
+					clientUI.Logger.Printf("need more decision from user")
 				}
 
 				close(askUserForDecisionCommand.receive)
 
-				// TODO(@rk): Without any proper game-logic, this reverting to "only-inspect-command" is being hit after just 1 repl command input.
-				// We need to be communicated by the PlayerClient if we can continue the above loop, i.e. allow more decision commands or not.
 				clientUI.stateMutex.Lock()
 				clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
 				clientUI.stateMutex.Unlock()
-
 				clientUI.appendEventLog("Done accepting decision commands in REPL")
+
+				// Reset the UI style as the local player's turn is over
+				clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
+					clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
+					clientUI.drawDeckGauge.BarColor = ui.ColorWhite
+					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+				})
 			}()
 
 		case logMessage := <-clientUI.LogWindowPullChan:
@@ -493,8 +533,42 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 				clientUI.handleCardTransferEvent(event, localPlayerName)
 			})
 
+		case uknow.AwaitingWildCardColorDecisionEvent:
+			if event.AskDecisionFromLocalPlayer {
+				clientUI.appendEventLog(event.StringMessage(localPlayerName))
+			}
+
+		case uknow.ChallengerSuccessEvent:
+			// Set challenge result info as command prompt
+			clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards?", event.WildDraw4PlayerName)
+			})
+
+			// Reset after a bit
+			go func() {
+				<-time.After(5 * time.Second)
+				clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+				})
+			}()
+
+		case uknow.ChallengerFailedEvent:
+			// Set challenge result info as command prompt
+			clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4?"
+			})
+
+			// Reset after a bit
+			go func() {
+				<-time.After(5 * time.Second)
+				clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+				})
+			}()
+
 		default:
 			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
+			clientUI.appendEventLog("<Unknown game event received>")
 		}
 	}
 }

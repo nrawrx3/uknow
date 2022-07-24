@@ -39,6 +39,8 @@ const (
 	CmdDropCard
 	CmdDrawCard
 	CmdDrawCardFromPile
+	CmdSetWildCardColor
+	CmdNoChallenge
 	CmdChallenge
 )
 
@@ -151,17 +153,30 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.Cards = cards
 		return tok, command, nil
 
+	case "wild_color":
+		command.Kind = CmdSetWildCardColor
+		tok := s.Scan()
+		if tok != scanner.Ident {
+			return tok, command, fmt.Errorf("expected a color (red|blue|yellow|green) as argument of wild_color command")
+		}
+
+		color, ok := getColorFromString(s.TokenText())
+		if !ok {
+			return tok, command, fmt.Errorf("invalid color: %s", s.TokenText())
+		}
+		command.ExtraData = color
+		return s.Scan(), command, nil
+
 	case "quit":
 		command.Kind = CmdQuit
 		return s.Scan(), command, nil
 
 	case "challenge":
 		command.Kind = CmdChallenge
-		tok = s.Scan()
-		if tok != scanner.Ident {
-			return tok, command, fmt.Errorf("expected name of person to challenge")
-		}
-		command.TargetPlayerName = s.TokenText()
+		return s.Scan(), command, nil
+
+	case "no_challenge":
+		command.Kind = CmdNoChallenge
 		return s.Scan(), command, nil
 
 	case "connect_default":
@@ -184,6 +199,21 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 
 	default:
 		return tok, command, fmt.Errorf("expected a main-command (draw|drop|quit|challenge), found '%s'", s.TokenText())
+	}
+}
+
+func getColorFromString(s string) (uknow.Color, bool) {
+	switch strings.ToLower(s) {
+	case "red":
+		return uknow.ColorRed, true
+	case "blue":
+		return uknow.ColorBlue, true
+	case "green":
+		return uknow.ColorGreen, true
+	case "yellow":
+		return uknow.ColorYellow, true
+	default:
+		return uknow.ColorWild, false
 	}
 }
 
@@ -231,13 +261,13 @@ func parseCardSequence(s *scanner.Scanner, cards []uknow.Card) (rune, []uknow.Ca
 	}
 	switch strings.ToLower(s.TokenText()) {
 	case "red":
-		card.Color = uknow.Red
+		card.Color = uknow.ColorRed
 	case "green":
-		card.Color = uknow.Green
+		card.Color = uknow.ColorGreen
 	case "blue":
-		card.Color = uknow.Blue
+		card.Color = uknow.ColorBlue
 	case "yellow":
-		card.Color = uknow.Yellow
+		card.Color = uknow.ColorYellow
 	default:
 		return tok, cards, fmt.Errorf("expected a card color (red|green|blue|yellow). Got '%s'", s.TokenText())
 	}

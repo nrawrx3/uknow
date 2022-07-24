@@ -23,10 +23,19 @@ type AskUserForDecisionResult struct {
 
 type UICommandAskUserForDecision struct {
 	// The PlayerClient itself will wait on this channel to receive the command input from user
-	receive            chan<- *ReplCommand
-	decisionResultChan <-chan AskUserForDecisionResult
-	timeout            time.Duration
-	sender             string
+	receive             chan<- *ReplCommand
+	decisionResultChan  <-chan AskUserForDecisionResult
+	timeout             time.Duration
+	sender              string
+	challengeablePlayer string
+}
+
+func (d *UICommandAskUserForDecision) LocalPlayerCanChallenge() bool {
+	return d.challengeablePlayer != ""
+}
+
+func (d *UICommandAskUserForDecision) SetChallengeablePlayer(challengeablePlayer string) {
+	d.challengeablePlayer = challengeablePlayer
 }
 
 func (*UICommandAskUserForDecision) uiCommandDummy() {}

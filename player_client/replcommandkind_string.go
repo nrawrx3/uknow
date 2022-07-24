@@ -18,12 +18,14 @@ func _() {
 	_ = x[CmdDropCard-7]
 	_ = x[CmdDrawCard-8]
 	_ = x[CmdDrawCardFromPile-9]
-	_ = x[CmdChallenge-10]
+	_ = x[CmdSetWildCardColor-10]
+	_ = x[CmdNoChallenge-11]
+	_ = x[CmdChallenge-12]
 }
 
-const _ReplCommandKind_name = "CmdNoneCmdAskUserToPlayCmdDeclareReadyCmdQuitCmdConnectCmdTableInfoCmdShowHandCmdDropCardCmdDrawCardCmdDrawCardFromPileCmdChallenge"
+const _ReplCommandKind_name = "CmdNoneCmdAskUserToPlayCmdDeclareReadyCmdQuitCmdConnectCmdTableInfoCmdShowHandCmdDropCardCmdDrawCardCmdDrawCardFromPileCmdSetWildCardColorCmdNoChallengeCmdChallenge"
 
-var _ReplCommandKind_index = [...]uint8{0, 7, 23, 38, 45, 55, 67, 78, 89, 100, 119, 131}
+var _ReplCommandKind_index = [...]uint8{0, 7, 23, 38, 45, 55, 67, 78, 89, 100, 119, 138, 152, 164}
 
 func (i ReplCommandKind) String() string {
 	if i < 0 || i >= ReplCommandKind(len(_ReplCommandKind_index)-1) {

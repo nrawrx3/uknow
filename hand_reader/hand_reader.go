@@ -209,10 +209,11 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 		table.DiscardedPile = append(remainingDiscardPile, table.DiscardedPile...)
 	}
 
-	table.RequiredColor = table.DiscardedPile.MustTop().Color
+	table.RequiredColorOfCurrentTurn = table.DiscardedPile.MustTop().Color
 	table.IsShuffled = true
 	table.PlayerOfNextTurn = serializedJSON.playerToDraw
-	table.PlayerTurnState = uknow.TurnStateStart
+	table.PlayerOfLastTurn = serializedJSON.playerToDraw
+	table.TurnStateTag = uknow.StartOfTurn
 
 	return table, nil
 }
@@ -220,17 +221,17 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 func colorFromKey(colorKey string) (uknow.Color, error) {
 	switch strings.ToLower(colorKey) {
 	case "red":
-		return uknow.Red, nil
+		return uknow.ColorRed, nil
 	case "blue":
-		return uknow.Blue, nil
+		return uknow.ColorBlue, nil
 	case "green":
-		return uknow.Green, nil
+		return uknow.ColorGreen, nil
 	case "yellow":
-		return uknow.Yellow, nil
+		return uknow.ColorYellow, nil
 	case "wild":
-		return uknow.Wild, nil
+		return uknow.ColorWild, nil
 	default:
-		return uknow.Wild, fmt.Errorf("unknown color key: '%s'", colorKey)
+		return uknow.ColorWild, fmt.Errorf("unknown color key: '%s'", colorKey)
 	}
 }
 
@@ -278,10 +279,10 @@ func castHandDescMap(handDescIF interface{}) (*handDesc, error) {
 		drawUpto:     drawUpto{},
 	}
 
-	handDesc.cardsOfColor[uknow.Red] = make([]uknow.Card, 0, len(handDescMap))
-	handDesc.cardsOfColor[uknow.Blue] = make([]uknow.Card, 0, len(handDescMap))
-	handDesc.cardsOfColor[uknow.Green] = make([]uknow.Card, 0, len(handDescMap))
-	handDesc.cardsOfColor[uknow.Yellow] = make([]uknow.Card, 0, len(handDescMap))
+	handDesc.cardsOfColor[uknow.ColorRed] = make([]uknow.Card, 0, len(handDescMap))
+	handDesc.cardsOfColor[uknow.ColorBlue] = make([]uknow.Card, 0, len(handDescMap))
+	handDesc.cardsOfColor[uknow.ColorGreen] = make([]uknow.Card, 0, len(handDescMap))
+	handDesc.cardsOfColor[uknow.ColorYellow] = make([]uknow.Card, 0, len(handDescMap))
 
 	for key, valueIF := range handDescMap {
 		if key == "draw_upto" {
@@ -368,12 +369,12 @@ func parsePresetDiscardPileTop(value interface{}) (uknow.Deck, error) {
 			case "wild":
 				card = uknow.Card{
 					Number: uknow.NumberWild,
-					Color:  uknow.Wild,
+					Color:  uknow.ColorWild,
 				}
 			case "wild_draw_4":
 				card = uknow.Card{
 					Number: uknow.NumberWildDrawFour,
-					Color:  uknow.Wild,
+					Color:  uknow.ColorWild,
 				}
 			}
 
@@ -386,13 +387,13 @@ func parsePresetDiscardPileTop(value interface{}) (uknow.Deck, error) {
 
 			switch colorName {
 			case "red":
-				card.Color = uknow.Red
+				card.Color = uknow.ColorRed
 			case "blue":
-				card.Color = uknow.Blue
+				card.Color = uknow.ColorBlue
 			case "yellow":
-				card.Color = uknow.Yellow
+				card.Color = uknow.ColorYellow
 			case "green":
-				card.Color = uknow.Green
+				card.Color = uknow.ColorGreen
 			}
 
 			switch number := tupleCardDesc[1].(type) {
