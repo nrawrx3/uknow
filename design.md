@@ -58,6 +58,10 @@ stateDiagram-v2
 
 	state "Done syncing last player decision" as s6
 
+	state "Waiting for challenge decision" as s8
+
+	state "Sync challenge decision with all players" as s9
+
 	s0 --> s0: add new player
 
 	s0 --> s1: set ready to serve cards
@@ -68,9 +72,15 @@ stateDiagram-v2
 
 	s3 --> s4: emit ChosenPlayer event
 
-	s4 --> s5: receive decision command from chosen player
+	s4 --> s5: receive decision command from chosen player BAD IDEA
 
-	s5 --> s6: sync decision with each client
+	s5 --> s6: sync decision with each client if non-wild-4 BAD IDEA
+
+	s5 --> s8: sync decision with each client if wild-4    BAD IDEA
+
+	s8 --> s9: receive challenge decision event from wild-4 target player BAD IDEA
+
+	s9 --> s6: sync decision with each client
 
 	s6 --> s3: choose next player
 
@@ -99,7 +109,7 @@ stateDiagram-v2
 
 	s3 --> s4: wait for chosen player message
 
-	s4 --> s51: we are chosen player
+	s4 --> s51: we are chosen player (also, there must be some challenge pending)
 
 	s51 --> s6: ask player for decision and validate
 
@@ -138,3 +148,30 @@ When the PlayerClient asks the user for decision, all eligible commands are logg
 
 
 UI should have cards shown as colored. The Discard Pile and the Player Hand in particular could be grids themselves.
+
+
+Card play state - specific to uknow.Table only.
+
+```mermaid
+stateDiagram-v2
+
+	state "player decision" as s1
+	state "player drop card" as s_drop_card
+
+	s_drop_card --> s_eval_card
+
+	s_eval_card --> s_invalid: forbidden
+	s_eval_card --> s_normal_color_card: allowed
+	s_eval_card --> s_non_wild_action_card: allowed
+	s_eval_card --> s_wild_card: allowed
+
+	s_normal_color_card --> s_play_without_entering_feedback
+	s_non_wild_action_card --> s_play_without_entering_feedback
+
+	s_wild_card --> s_await_wild_card_color_command
+```
+
+Here `s_enter_wild_card_feedback` denotes a state where the table is expecting a `wild_color <color>` command from the player.
+
+What about `wild_draw_4`?
+

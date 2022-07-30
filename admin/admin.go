@@ -35,13 +35,14 @@ var (
 type AdminState string
 
 const (
-	AddingPlayers             AdminState = "adding_players"
-	ReadyToServeCards         AdminState = "ready_to_serve_cards"
-	CardsServed               AdminState = "cards_served"
-	PlayerChosenForTurn       AdminState = "player_chosen"
-	WaitingForPlayerDecision  AdminState = "waiting_for_player_decision"
-	SyncingPlayerDecision     AdminState = "syncing_player_decision"
-	DoneSyncingPlayerDecision AdminState = "done_syncing_player_decision"
+	AddingPlayers                     AdminState = "adding_players"
+	ReadyToServeCards                 AdminState = "ready_to_serve_cards"
+	CardsServed                       AdminState = "cards_served"
+	PlayerChosenForTurn               AdminState = "player_chosen"
+	WaitingForPlayerDecision          AdminState = "waiting_for_player_decision"
+	WaitingForChallengePlayerDecision AdminState = "waiting_for_challenge"
+	SyncingPlayerDecision             AdminState = "syncing_player_decision"
+	DoneSyncingPlayerDecision         AdminState = "done_syncing_player_decision"
 )
 
 func playerWithAddress(addr utils.TCPAddress, listenAddrOfPlayer map[string]utils.TCPAddress) (string, error) {
@@ -134,7 +135,7 @@ func (a *Admin) Restart() {
 	a.stateMutex.Lock()
 	defer a.stateMutex.Unlock()
 
-	a.table = uknow.NewAdminTable(a.table.Logger)
+	a.table = createStartingTable(&envConfig)
 
 	a.logger = uknow.CreateFileLogger(false, logFilePrefix)
 
@@ -424,6 +425,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	if setReadyMessage.ShufflerIsFirstPlayer {
 		admin.table.PlayerOfNextTurn = admin.table.ShufflerName
+		admin.table.PlayerOfLastTurn = admin.table.ShufflerName
 	}
 
 	go admin.sendServeCardsEventToAllPlayers()
@@ -436,39 +438,43 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
 
-	// DTL(@rk): What happens when the waiting player disconnects? I think anytime we stop receiving heartbeats, we should reset the admin and notify the clients that the admin is resetting.
-	if admin.state != WaitingForPlayerDecision {
-		w.WriteHeader(http.StatusSeeOther)
-		err := fmt.Errorf("%w: %s", errorInvalidAdminState, admin.state)
-		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err.Error())
-		errorResponse := messages.UnwrappedErrorPayload{}
-		errorResponse.Add(err)
-		messages.EncodeJSONAndEncrypt(&errorResponse, w, admin.aesCipher)
-		return
+	switch admin.state {
+	case WaitingForPlayerDecision:
+		var event messages.PlayerDecisionsEvent
+		err := messages.DecryptAndDecodeJSON(&event, r.Body, admin.aesCipher)
+		if err != nil {
+			admin.logger.Printf("handlePlayerDecisionsEvent: %s", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		admin.logger.Printf("Received decisions event from player: %s, decisions: %+v, decisionCounter: %d", event.DecidingPlayer, event.Decisions, event.DecisionEventCounter)
+
+		ack := expectedAck{
+			ackId:           makeAckIdWaitingForPlayerDecision(event.DecidingPlayer, event.DecisionEventCounter),
+			ackerPlayerName: event.DecidingPlayer,
+		}
+
+		if event.DecisionEventCounter != admin.decisionEventsCompleted {
+			admin.logger.Printf("Unexpected decision event counter in ack: %s, but admin decision counter is %d", ack.ackId, admin.decisionEventsCompleted)
+		}
+
+		admin.expectedAcksList.chNewAckReceived <- ack
+
+		go admin.syncPlayerDecisionsEvent(event)
+
+	default:
+		// DTL(@rk): What happens when the waiting player disconnects? I think anytime we stop receiving heartbeats, we should reset the admin and notify the clients that the admin is resetting.
+		if admin.state != WaitingForPlayerDecision {
+			w.WriteHeader(http.StatusSeeOther)
+			err := fmt.Errorf("%w: %s", errorInvalidAdminState, admin.state)
+			admin.logger.Printf("handlePlayerDecisionsEvent: %s", err.Error())
+			errorResponse := messages.UnwrappedErrorPayload{}
+			errorResponse.Add(err)
+			messages.EncodeJSONAndEncrypt(&errorResponse, w, admin.aesCipher)
+			return
+		}
 	}
-
-	var event messages.PlayerDecisionsEvent
-	err := messages.DecryptAndDecodeJSON(&event, r.Body, admin.aesCipher)
-	if err != nil {
-		admin.logger.Printf("handlePlayerDecisionsEvent: %s", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	admin.logger.Printf("Received decisions event from player: %s, decisions: %+v, decisionCounter: %d", event.PlayerName, event.Decisions, event.DecisionEventCounter)
-
-	ack := expectedAck{
-		ackId:           makeAckIdWaitingForPlayerDecision(event.PlayerName, event.DecisionEventCounter),
-		ackerPlayerName: event.PlayerName,
-	}
-
-	if event.DecisionEventCounter != admin.decisionEventsCompleted {
-		admin.logger.Printf("Unexpected decision event counter in ack: %s, but admin decision counter is %d", ack.ackId, admin.decisionEventsCompleted)
-	}
-
-	admin.expectedAcksList.chNewAckReceived <- ack
-
-	go admin.syncPlayerDecisionsEvent(event)
 }
 
 func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent) {
@@ -478,11 +484,12 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 
 	// Evaluate the decisions on the admin table
 	admin.stateMutex.Lock()
-	admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.PlayerName, syncEvent.Decisions)
+	admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.DecidingPlayer, syncEvent.Decisions)
 	admin.state = SyncingPlayerDecision
 	admin.stateMutex.Unlock()
 
-	// TODO(@rk): Here we need to check table state and see if any player has won the game.
+	// TODO(@rk): Here we need to check table state and see if any player
+	// has won the game.
 
 	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
 	if err != nil {
@@ -492,9 +499,12 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 	}
 
 	admin.stateMutex.Lock()
-	admin.state = DoneSyncingPlayerDecision
-	admin.stateMutex.Unlock()
+	defer admin.stateMutex.Unlock()
 
+	admin.decisionEventsCompleted++
+	admin.state = DoneSyncingPlayerDecision
+	// TODO(@rk): Don't really need to start new goroutine for runNewTurn(),
+	// although it does keep the logic separate.
 	go admin.runNewTurn()
 }
 
@@ -522,7 +532,8 @@ func (admin *Admin) startNewTurn() {
 	go admin.sendChosenPlayerEventToAllPlayers()
 }
 
-// Call this to broadcast the event too all players. We can essentially send any []byte, but we make a decision to use this to only send event messages.
+// Call this to broadcast the event to all players. We can essentially send any
+// []byte, but we make a decision to use this to only send event messages.
 func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath string, requestStruct interface{}) error {
 	ctx, _ = context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
 	g, ctx := errgroup.WithContext(ctx)
@@ -531,7 +542,10 @@ func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath s
 		playerName := playerName
 		playerAddr := playerAddr
 
-		// TODO(@rk): We're copying one bytes.Buffer to another bytes.Buffer here. Also we need to create a new bytes.Buffer every round of the loop since we're making requests concurrently.
+		// TODO(@rk): We're copying one bytes.Buffer to another
+		// bytes.Buffer here, can we avoid? Also we need to create a new
+		// bytes.Buffer every round of the loop since we're making
+		// requests concurrently.
 		var b bytes.Buffer
 		err := messages.EncodeJSONAndEncrypt(&requestStruct, &b, admin.aesCipher)
 		if err != nil {
@@ -706,12 +720,15 @@ func (admin *Admin) RunREPL() {
 func createStartingTable(c *EnvConfig) *uknow.Table {
 	tableLogger := uknow.CreateFileLogger(false, "table_admin")
 	table := uknow.NewAdminTable(tableLogger)
+	var err error
 
-	if c.DebugStartingHandConfigJSON == "" {
+	if c.DebugStartingHandConfigFile != "" {
+		table, err = hand_reader.LoadConfigFromFile(c.DebugStartingHandConfigFile, table, tableLogger)
+	} else if c.DebugStartingHandConfigJSON != "" {
+		table, err = hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
+	} else {
 		return table
 	}
-
-	table, err := hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
 
 	if err != nil {
 		log.Fatalf("failed to load hand-config: %s", err)

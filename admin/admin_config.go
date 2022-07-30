@@ -10,4 +10,5 @@ type EnvConfig struct {
 	// Testing, debugging related options
 	DebugNewTurnViaPrompt       bool   `split_words:"true" default:"false"`
 	DebugStartingHandConfigJSON string `split_words:"true"`
+	DebugStartingHandConfigFile string `split_words:"true"`
 }

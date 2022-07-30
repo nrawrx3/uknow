@@ -20,7 +20,7 @@ func (c Card) EncodeUint32() uint32 {
 
 func DecodeCardFromUint32(x uint32) (Card, error) {
 	color := uint32(x & colorMask)
-	if color > uint32(Yellow) {
+	if color > uint32(ColorYellow) {
 		return Card{}, ErrInvalidCardColor
 	}
 	number := uint32(x&numberMask) >> colorBitsCount

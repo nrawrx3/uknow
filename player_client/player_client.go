@@ -36,19 +36,17 @@ const (
 	WaitingForDecisionSync        PlayerClientState = "waiting_for_decision_sync"
 )
 
-var ErrorClientAwaitingApproval = errors.New("client awaiting approval of previous command")
-var ErrorClientUnexpectedSender = errors.New("unexpected sender")
 var ErrorFailedToConnectToNewPlayer = errors.New("failed to connect to new player")
 var ErrorUIFailedToConsumeCommand = errors.New("ui failed to consume command")
-var ErrorUnknownEvent = errors.New("unknown event")
 var ErrorFailedToEvaluateReplCommand = errors.New("failed to evaluate repl command")
+var ErrorUnimplementedReplCommand = errors.New("unimplemented repl command")
 
 type ClientChannels struct {
 	GeneralUICommandPushChan       chan<- UICommand
 	AskUserForDecisionPushChan     chan<- *UICommandAskUserForDecision
 	NonDecisionReplCommandPullChan <-chan *ReplCommand
 	LogWindowPushChan              chan<- string
-	CardTransferEventPushChan      chan<- uknow.CardTransferEvent
+	GameEventPushChan              chan<- uknow.GameEvent
 }
 type PlayerClient struct {
 	// Used to protect the non-gui state
@@ -118,7 +116,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
 	go (&dummyCardTransferEventConsumer{
 		decisionEventPullChan: DummyCardTransferEventConsumerChan,
-	}).RunConsumer(c.Logger)
+	}).RunConsumer(c.Logger, c.table.LocalPlayerName)
 
 	return c
 }
@@ -219,6 +217,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 		case CmdTableInfo:
 			c.logToWindow("--- table_info:")
 			c.logToWindow(fmt.Sprintf(`client_state: %s`, c.clientState))
+			c.logToWindow(c.table.Summary())
 			c.logToWindow("---")
 
 		default:
@@ -404,7 +403,6 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 		c.logToWindow("It's our turn now!")
 	} else {
 		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
-		// TODO(@rk): Move to "waiting for player decision sync message from admin"
 		c.clientState = WaitingForDecisionSync
 		return
 	}
@@ -421,13 +419,17 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	// c.logToWindow(c.table.Summary())
 
 	receiveReplCommandsChan := make(chan *ReplCommand)
-	allowOneMoreDecision := make(chan bool)
+	askUserForDecisionResultChan := make(chan AskUserForDecisionResult)
 
 	askCommand := &UICommandAskUserForDecision{
-		receive:              receiveReplCommandsChan,
-		allowOneMoreDecision: allowOneMoreDecision,
-		timeout:              10 * time.Second, // TODO(@rk): Unused and arbitrary. Think later.
-		sender:               "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
+		receive:            receiveReplCommandsChan,
+		decisionResultChan: askUserForDecisionResultChan,
+		timeout:            10 * time.Second, // TODO(@rk): Unused and arbitrary. Think later.
+		sender:             "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
+	}
+
+	if c.table.TurnStateTag == uknow.AwaitingWildDraw4ChallengeDecision {
+		askCommand.SetChallengeablePlayer(c.table.PlayerOfLastTurn)
 	}
 
 	c.AskUserForDecisionPushChan <- askCommand
@@ -440,18 +442,29 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		decision, err := c.evalReplCommandOnTable(replCommand)
 
 		if err != nil {
-			c.Logger.Fatalf("evalReplCommandOnTable failed: %s", err.Error())
+			var errEvalDecision *uknow.EvalDecisionError
+			if errors.As(err, &errEvalDecision) {
+				msg := fmt.Sprintf("invalid decision, eligible decisions are: %s", uknow.EligibleCommandsAtState(c.table.TurnStateTag))
+				c.Logger.Printf(msg)
+				c.logToWindow(msg)
+			} else {
+				c.Logger.Printf("evalReplCommandOnTable failed: %s", err.Error())
+			}
+
+			askUserForDecisionResultChan <- AskUserForDecisionResult{
+				Error:                 err,
+				AskForOneMoreDecision: true, // CONSIDER(@rk): Perhaps we only allow a certain number of retries?
+			}
+			continue
 		}
 
 		c.Logger.Printf("Received replCommand: %s, decisionEvent: %s", replCommand.Kind.String(), &decision)
 
 		decisions = append(decisions, decision)
 
-		// TODO(@rk): Uncomment. After proper game logic is implemented.
-		// allowOneMoreDecision <- c.table.NextPlayerToDraw == c.table.LocalPlayerName
-
-		// TODO(@rk): Remove. See above.
-		allowOneMoreDecision <- false
+		askUserForDecisionResultChan <- AskUserForDecisionResult{
+			AskForOneMoreDecision: c.table.NeedMoreUserDecisionToFinishTurn(),
+		}
 	}
 
 	c.Logger.Printf("Done receiving player decision events from ClientUI")
@@ -459,7 +472,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	// Send decisions to admin
 	requestBody := messages.PlayerDecisionsEvent{
 		Decisions:            decisions,
-		PlayerName:           c.table.LocalPlayerName,
+		DecidingPlayer:       c.table.LocalPlayerName,
 		DecisionEventCounter: decisionEventCounter,
 	}
 
@@ -492,7 +505,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
-// POST /player_decisions
+// POST /player_decisions_sync
 func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *http.Request) {
 	c.Logger.Printf("Received player_decisions_sync message")
 	var decisionsEvent messages.PlayerDecisionsSyncEvent
@@ -509,7 +522,7 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 	defer c.stateMutex.Unlock()
 
 	// Admin sends the sync event to all clients, including the client who generated the decisions. Handling this.
-	if decisionsEvent.PlayerName == c.table.LocalPlayerName {
+	if decisionsEvent.DecidingPlayer == c.table.LocalPlayerName {
 		return
 	}
 
@@ -520,38 +533,67 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 	}
 
 	// Eval decisions of other player
-	c.Logger.Printf("Evaluating player %s's decisions: %+v", decisionsEvent.PlayerName, decisionsEvent)
-	c.table.EvalPlayerDecisions(decisionsEvent.PlayerName, decisionsEvent.Decisions, c.CardTransferEventPushChan)
+	c.Logger.Printf("Evaluating player %s's %d decisions: %+v", decisionsEvent.DecidingPlayer, len(decisionsEvent.Decisions), decisionsEvent)
+	c.table.EvalPlayerDecisions(decisionsEvent.DecidingPlayer, decisionsEvent.Decisions, c.GameEventPushChan)
 
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
+// Maps the repl command to a PlayerDecision and evaluates it on the table with
+// local player as the deciding player.
 func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.PlayerDecision, error) {
 	switch replCommand.Kind {
 	case CmdDropCard:
-		decisionEvent := uknow.PlayerDecision{
+		decision := uknow.PlayerDecision{
 			Kind:       uknow.PlayerDecisionPlayHandCard,
 			ResultCard: replCommand.Cards[0],
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
 
 	case CmdDrawCard:
-		decisionEvent := uknow.PlayerDecision{
+		decision := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
 
 	case CmdDrawCardFromPile:
-		decisionEvent := uknow.PlayerDecision{
+		decision := uknow.PlayerDecision{
 			Kind: uknow.PlayerDecisionPullFromDeck,
 		}
 
-		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decisionEvent, c.CardTransferEventPushChan)
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
+
+	case CmdSetWildCardColor:
+		chosenColor, ok := replCommand.ExtraData.(uknow.Color)
+		if !ok {
+			return uknow.PlayerDecision{}, uknow.ErrShouldNotHappen
+		}
+
+		decision := uknow.PlayerDecision{
+			Kind:                uknow.PlayerDecisionWildCardChooseColor,
+			WildCardChosenColor: chosenColor,
+		}
+
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
+
+	case CmdChallenge:
+		decision := uknow.PlayerDecision{
+			Kind:                uknow.PlayerDecisionDoChallenge,
+			WildCardChosenColor: c.table.RequiredColorOfCurrentTurn,
+		}
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
+
+	case CmdNoChallenge:
+		decision := uknow.PlayerDecision{
+			Kind:                uknow.PlayerDecisionDontChallenge,
+			WildCardChosenColor: c.table.RequiredColorOfCurrentTurn,
+		}
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
 
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())
-		return uknow.PlayerDecision{}, nil
+		return uknow.PlayerDecision{}, ErrorUnimplementedReplCommand
 	}
 }
 

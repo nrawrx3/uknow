@@ -27,7 +27,7 @@ func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clien
 	}
 
 	msg.PlayerNames = append(msg.PlayerNames, playerName)
-	msg.ClientListenAddrs = append(msg.ClientListenAddrs, utils.TCPAddress{clientHost, clientPort, protocol})
+	msg.ClientListenAddrs = append(msg.ClientListenAddrs, utils.TCPAddress{Host: clientHost, Port: clientPort, Protocol: protocol})
 	return msg
 }
 
@@ -40,12 +40,15 @@ type AckNewPlayerAddedMessage struct {
 	NewPlayer   string `json:"new_player"`
 }
 
-// Sent my admin to all players
+// Sent by admin to all players
 type SetReadyMessage struct {
 	ShufflerName          string `json:"shuffler_name"`
 	ShufflerIsFirstPlayer bool   `json:"shuffler_is_first_player"`
 }
 
+// Event messages are used to communicate "stuff" between the clients and admin.
+// The REST path for events is POST /events/<event_name> for both client and
+// admin. These are distinct from uknow.GameEvent.
 type EventMessage interface {
 	RestPath() string
 }
@@ -67,9 +70,10 @@ func (*ChosenPlayerEvent) RestPath() string {
 	return "chosen_player"
 }
 
+// Wraps a sequence of player decisions from a single player in an event.
 type PlayerDecisionsEvent struct {
 	Decisions            []uknow.PlayerDecision `json:"decisions"`
-	PlayerName           string                 `json:"player_name"`
+	DecidingPlayer       string                 `json:"deciding_player"`
 	DecisionEventCounter int                    `json:"decision_event_counter"` // counter for tracking/debugging decisions in case of disconnections
 }
 

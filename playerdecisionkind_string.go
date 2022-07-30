@@ -9,13 +9,15 @@ func _() {
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
 	_ = x[PlayerDecisionPullFromDeck-1]
-	_ = x[PlayerDecisionPullFromPile-2]
-	_ = x[PlayerDecisionPlayHandCard-3]
+	_ = x[PlayerDecisionPlayHandCard-2]
+	_ = x[PlayerDecisionWildCardChooseColor-3]
+	_ = x[PlayerDecisionDoChallenge-4]
+	_ = x[PlayerDecisionDontChallenge-5]
 }
 
-const _PlayerDecisionKind_name = "PlayerDecisionPullFromDeckPlayerDecisionPullFromPilePlayerDecisionPlayHandCard"
+const _PlayerDecisionKind_name = "PlayerDecisionPullFromDeckPlayerDecisionPlayHandCardPlayerDecisionWildCardChooseColorPlayerDecisionDoChallengePlayerDecisionDontChallenge"
 
-var _PlayerDecisionKind_index = [...]uint8{0, 26, 52, 78}
+var _PlayerDecisionKind_index = [...]uint8{0, 26, 52, 85, 110, 137}
 
 func (i PlayerDecisionKind) String() string {
 	i -= 1
