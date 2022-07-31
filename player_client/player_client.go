@@ -591,6 +591,13 @@ func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.P
 		}
 		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
 
+	case CmdPass:
+		decision := uknow.PlayerDecision{
+			Kind: uknow.PlayerDecisionPass,
+		}
+
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
+
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())
 		return uknow.PlayerDecision{}, ErrorUnimplementedReplCommand

@@ -570,6 +570,7 @@ const (
 	PlayerDecisionPullFromDeck PlayerDecisionKind = iota + 1
 	// PlayerDecisionPullFromPile
 	PlayerDecisionPlayHandCard
+	PlayerDecisionPass
 	PlayerDecisionWildCardChooseColor
 	PlayerDecisionDoChallenge
 	PlayerDecisionDontChallenge
@@ -635,15 +636,18 @@ var ErrShouldNotHappen = errors.New("something like this should not happen, plea
 
 var ErrCardNotInHand = errors.New("card not in hand")
 var ErrAlreadyDrewCard = errors.New("already drew card this turn")
+var ErrPassWithoutDrawOrDrop = errors.New("cannot pass without drawing a card or playing a card from hand")
 var ErrDrawDeckIsEmpty = errors.New("draw-deck is empty")
 var ErrDiscardPileIsEmpty = errors.New("discard pile is empty")
 var ErrUnknownPlayer = errors.New("unknown player")
+var ErrInvalidDecision = errors.New("invalid decision")
 var ErrIllegalPlayCard = errors.New("card illegal")
 var ErrUnexpectedDecision = errors.New("unexpected decision")
 
 func (t *Table) NeedMoreUserDecisionToFinishTurn() bool {
 	res := t.TurnStateTag == AwaitingWildCardColorDecision ||
-		t.TurnStateTag == AwaitingWildDraw4CardColorDecision
+		t.TurnStateTag == AwaitingWildDraw4CardColorDecision ||
+		t.TurnStateTag == AwaitingPlayOrPass
 	t.Logger.Printf("Need more decision from %s? %v", t.LocalPlayerName, res)
 	return res
 }
@@ -665,12 +669,25 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 		decision.ResultCard = topCard
+		t.TurnStateTag = AwaitingPlayOrPass
+
+		gameEventPushChan <- AwaitingPlayOrPassEvent{
+			Player:                     decidingPlayer,
+			AskDecisionFromLocalPlayer: decidingPlayer == t.LocalPlayerName,
+		}
+
+	case PlayerDecisionPass:
+		if t.TurnStateTag != AwaitingPlayOrPass {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrPassWithoutDrawOrDrop}
+		}
+
 		t.SetNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
 
-		// TODO(@rk): Should go into "awaiting continue or card play
-		// decision after pulling" state
-
 	case PlayerDecisionPlayHandCard:
+		if t.TurnStateTag != StartOfTurn && t.TurnStateTag != AwaitingPlayOrPass {
+			return decision, &EvalDecisionError{Decision: decision, Reason: ErrInvalidDecision}
+		}
+
 		return t.TryPlayCard(decidingPlayer, decision.ResultCard, gameEventPushChan)
 
 	case PlayerDecisionWildCardChooseColor:
@@ -958,7 +975,6 @@ func (t *Table) EvalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 		gameEventPushChan <- event
 
 	default:
-		// TODO(@rk): Implement for remaining action cards
 		t.Logger.Panicf("failed to eval action card %s, not implemented", actionCard.String())
 	}
 }

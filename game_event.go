@@ -196,3 +196,17 @@ func (e *ChallengerFailedEvent) StringMessage(localPlayerName string) string {
 func (e ChallengerFailedEvent) GameEventName() string {
 	return "ChallengerFailedEvent"
 }
+
+type AwaitingPlayOrPassEvent struct {
+	Player                     string
+	AskDecisionFromLocalPlayer bool
+}
+
+func (e *AwaitingPlayOrPassEvent) StringMessage(localPlayerName string) string {
+	playerName := changeIfSelf(e.Player, localPlayerName)
+	return fmt.Sprintf("awaiting for card play or pass from %s", playerName)
+}
+
+func (e AwaitingPlayOrPassEvent) GameEventName() string {
+	return "AwaitingPlayOrPassEvent"
+}

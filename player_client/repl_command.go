@@ -38,7 +38,8 @@ const (
 	// Player decision commands. Add new decision commands to the _middle_ of the list, or update IsUserDecisionCommand function.
 	CmdDropCard
 	CmdDrawCard
-	CmdDrawCardFromPile
+	CmdPass
+	CmdDrawCardFromPile // TODO(@rk): Delete this? Not needed.
 	CmdSetWildCardColor
 	CmdNoChallenge
 	CmdChallenge
@@ -177,6 +178,10 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 
 	case "no_challenge":
 		command.Kind = CmdNoChallenge
+		return s.Scan(), command, nil
+
+	case "pass":
+		command.Kind = CmdPass
 		return s.Scan(), command, nil
 
 	case "connect_default":

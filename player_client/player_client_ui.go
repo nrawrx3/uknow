@@ -529,6 +529,8 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 	for event := range clientUI.GameEventPullChan {
 		switch event := event.(type) {
 		case uknow.CardTransferEvent:
+			// clientUI.Logger.Printf("received")
+
 			clientUI.notifyRedrawUI(uiRedraw, func() {
 				clientUI.handleCardTransferEvent(event, localPlayerName)
 			})
@@ -559,12 +561,16 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 			})
 
 			// Reset after a bit
-			go func() {
-				<-time.After(5 * time.Second)
-				clientUI.notifyRedrawUI(uiRedraw, func() {
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
-				})
-			}()
+			go clientUI.runResetCommandPromptTitle(5 * time.Second)
+
+		case uknow.AwaitingPlayOrPassEvent:
+			clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.commandPromptCell.Title = "Please play a card or pass"
+			})
+
+			// TODO(@rk): This needs to reset only after the user
+			// has played a card or decided to pass
+			go clientUI.runResetCommandPromptTitle(5 * time.Second)
 
 		default:
 			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
@@ -573,7 +579,16 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 	}
 }
 
+func (clientUI *ClientUI) runResetCommandPromptTitle(timeout time.Duration) {
+	<-time.After(timeout)
+	clientUI.notifyRedrawUI(uiRedraw, func() {
+		clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+	})
+}
+
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
+	// TODO(@rk): Don't show the card info if the card transfer is happening
+	// to hand of non local player
 	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s, card: %s", event.String(localPlayerName), localPlayerName, event.Card.String()))
 
 	switch event.Source {
