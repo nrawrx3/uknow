@@ -541,36 +541,42 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 			}
 
 		case uknow.ChallengerSuccessEvent:
-			// Set challenge result info as command prompt
-			clientUI.notifyRedrawUI(uiRedraw, func() {
-				clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards?", event.WildDraw4PlayerName)
-			})
-
-			// Reset after a bit
-			go func() {
-				<-time.After(5 * time.Second)
+			if event.FromLocalClient() { // Set challenge result info as command prompt
 				clientUI.notifyRedrawUI(uiRedraw, func() {
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+					clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards", event.WildDraw4PlayerName)
 				})
-			}()
+
+				// // Reset after a bit
+				// go func() {
+				// 	<-time.After(5 * time.Second)
+				// 	clientUI.notifyRedrawUI(uiRedraw, func() {
+				// 		clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+				// 	})
+				// }()
+			}
 
 		case uknow.ChallengerFailedEvent:
-			// Set challenge result info as command prompt
-			clientUI.notifyRedrawUI(uiRedraw, func() {
-				clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4?"
-			})
+			if event.FromLocalClient() {
+				// Set challenge result info as command prompt
+				clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4"
+				})
 
-			// Reset after a bit
-			go clientUI.runResetCommandPromptTitle(5 * time.Second)
+				// Reset after a bit
+				go clientUI.runResetCommandPromptTitle(3 * time.Second)
+			}
 
 		case uknow.AwaitingPlayOrPassEvent:
-			clientUI.notifyRedrawUI(uiRedraw, func() {
-				clientUI.commandPromptCell.Title = "Please play a card or pass"
-			})
+			if event.FromLocalClient() {
+				clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.commandPromptCell.Title = "Please play a card or pass"
+				})
+			}
 
-			// TODO(@rk): This needs to reset only after the user
-			// has played a card or decided to pass
-			go clientUI.runResetCommandPromptTitle(5 * time.Second)
+		case uknow.PlayerPassedTurnEvent:
+			if event.IsFromLocalClient {
+				clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+			}
 
 		default:
 			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())

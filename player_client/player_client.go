@@ -400,7 +400,7 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	}
 
 	if c.table.LocalPlayerName == chosenPlayerEvent.PlayerName {
-		c.logToWindow("It's our turn now!")
+		c.logToWindow("=====Turn end=====")
 	} else {
 		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
 		c.clientState = WaitingForDecisionSync
