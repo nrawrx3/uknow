@@ -965,7 +965,7 @@ func (t *Table) EvalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 	case NumberWild:
 		t.TurnStateTag = AwaitingWildCardColorDecision
 		t.SetRequiredNumber(NumberWild)
-		// NOTE: We don't set required number to wild. Chosen color will be decided by another decision next.
+		// NOTE: We don't set ever required color to wild. Chosen color will be decided by another decision next.
 
 		event := AwaitingWildCardColorDecisionEvent{
 			Player:                     decidingPlayer,
@@ -986,7 +986,7 @@ func (t *Table) EvalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 		// AwaitingWildCardColorDecisionEvent also, but NOT doing that.
 		t.RequiredNumberBeforeWild4 = t.RequiredNumberOfCurrentTurn
 		t.SetRequiredNumber(NumberWildDrawFour)
-		// NOTE: We don't set required number to wild. Chosen color will be decided by another decision next.
+		// NOTE: We don't ever set required color to wild. Chosen color will be decided by another decision next.
 
 		event := AwaitingWildCardColorDecisionEvent{
 			Player:                     decidingPlayer,
