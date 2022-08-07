@@ -17,15 +17,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-type ClusterMap map[string]utils.TCPAddress // Map of player name to their public address
-
 type PlayerClientState string
 
 const (
@@ -68,7 +59,7 @@ type PlayerClient struct {
 	// player's address to confirm that it can connect. This also creates a
 	// connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
-	neighborListenAddr ClusterMap
+	neighborListenAddr map[string]utils.TCPAddress
 	adminAddr          utils.TCPAddress
 
 	// Exposes the player API to the game admin.
@@ -94,7 +85,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
 		httpClient:         utils.CreateHTTPClient(),
-		neighborListenAddr: make(ClusterMap),
+		neighborListenAddr: make(map[string]utils.TCPAddress),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		adminAddr:          config.DefaultAdminAddr,
