@@ -45,8 +45,8 @@ func (c *CardTransferEvent) String(localPlayerName string) string {
 		sinkName = "player " + c.SinkPlayer
 	}
 
-	sourceName = changeIfSelf(sourceName, localPlayerName)
-	sinkName = changeIfSelf(sinkName, localPlayerName)
+	sourceName, _ = changeIfSelf(sourceName, localPlayerName)
+	sinkName, _ = changeIfSelf(sinkName, localPlayerName)
 
 	return fmt.Sprintf("Card transfer from %s to %s", sourceName, sinkName)
 }
@@ -67,9 +67,9 @@ type SkipCardActionEvent struct {
 }
 
 func (e *SkipCardActionEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
-	skippedPlayerName := changeIfSelf(e.SkippedPlayer, localPlayerName)
-	nextPlayerName := changeIfSelf(e.NextPlayer, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
+	skippedPlayerName, _ := changeIfSelf(e.SkippedPlayer, localPlayerName)
+	nextPlayerName, _ := changeIfSelf(e.NextPlayer, localPlayerName)
 
 	return fmt.Sprintf("%s played a skip-card, skipping %s, making %s the next player", playerName, skippedPlayerName, nextPlayerName)
 }
@@ -90,9 +90,9 @@ type DrawTwoCardActionEvent struct {
 }
 
 func (e *DrawTwoCardActionEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
-	skippedPlayerName := changeIfSelf(e.SkippedPlayer, localPlayerName)
-	nextPlayerName := changeIfSelf(e.NextPlayer, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
+	skippedPlayerName, _ := changeIfSelf(e.SkippedPlayer, localPlayerName)
+	nextPlayerName, _ := changeIfSelf(e.NextPlayer, localPlayerName)
 
 	return fmt.Sprintf("%s played a draw-2-card, skipping and adding cards to %s, making %s the next player", playerName, skippedPlayerName, nextPlayerName)
 }
@@ -113,9 +113,9 @@ type ReverseCardActionEvent struct {
 }
 
 func (e *ReverseCardActionEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
-	skippedPlayerName := changeIfSelf(e.DeniedPlayer, localPlayerName)
-	nextPlayerName := changeIfSelf(e.NextPlayer, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
+	skippedPlayerName, _ := changeIfSelf(e.DeniedPlayer, localPlayerName)
+	nextPlayerName, _ := changeIfSelf(e.NextPlayer, localPlayerName)
 
 	return fmt.Sprintf("%s played a reverse-card, skipping %s and making %s the next player", playerName, skippedPlayerName, nextPlayerName)
 }
@@ -128,11 +128,11 @@ func (e ReverseCardActionEvent) FromLocalClient() bool {
 	return e.IsFromLocalClient
 }
 
-func changeIfSelf(playerName, localPlayerName string) string {
+func changeIfSelf(playerName, localPlayerName string) (string, bool) {
 	if playerName == localPlayerName {
-		return fmt.Sprintf("You(%s)", localPlayerName)
+		return fmt.Sprintf("You(%s)", localPlayerName), true
 	}
-	return playerName
+	return playerName, false
 }
 
 type WildCardActionEvent struct {
@@ -141,7 +141,7 @@ type WildCardActionEvent struct {
 }
 
 func (e *WildCardActionEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
 	return fmt.Sprintf("%s played a wild card", playerName)
 }
 
@@ -185,7 +185,7 @@ type WildCardColorChosenEvent struct {
 }
 
 func (e *WildCardColorChosenEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
 	return fmt.Sprintf("%s chose wild card color to be %s", playerName, e.ChosenColor.String())
 }
 
@@ -205,8 +205,8 @@ type ChallengerSuccessEvent struct {
 }
 
 func (e *ChallengerSuccessEvent) StringMessage(localPlayerName string) string {
-	challengerName := changeIfSelf(e.ChallengerName, localPlayerName)
-	wildPlayerName := changeIfSelf(e.WildDraw4PlayerName, localPlayerName)
+	challengerName, _ := changeIfSelf(e.ChallengerName, localPlayerName)
+	wildPlayerName, _ := changeIfSelf(e.WildDraw4PlayerName, localPlayerName)
 
 	var sb strings.Builder
 
@@ -233,8 +233,8 @@ type ChallengerFailedEvent struct {
 }
 
 func (e *ChallengerFailedEvent) StringMessage(localPlayerName string) string {
-	challengerName := changeIfSelf(e.ChallengerName, localPlayerName)
-	wildPlayerName := changeIfSelf(e.WildDraw4PlayerName, localPlayerName)
+	challengerName, _ := changeIfSelf(e.ChallengerName, localPlayerName)
+	wildPlayerName, _ := changeIfSelf(e.WildDraw4PlayerName, localPlayerName)
 	return fmt.Sprintf("%s un-successfully challenged %s", challengerName, wildPlayerName)
 }
 
@@ -253,7 +253,7 @@ type AwaitingPlayOrPassEvent struct {
 }
 
 func (e *AwaitingPlayOrPassEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
 	return fmt.Sprintf("awaiting for card play or pass from %s", playerName)
 }
 
@@ -272,7 +272,7 @@ type PlayerPassedTurnEvent struct {
 }
 
 func (e *PlayerPassedTurnEvent) StringMessage(localPlayerName string) string {
-	playerName := changeIfSelf(e.Player, localPlayerName)
+	playerName, _ := changeIfSelf(e.Player, localPlayerName)
 	return fmt.Sprintf("%s passed turn, next player is %s", playerName, e.PlayerOfNextTurn)
 }
 
@@ -282,4 +282,25 @@ func (e PlayerPassedTurnEvent) FromLocalClient() bool {
 
 func (e PlayerPassedTurnEvent) GameEventName() string {
 	return "PlayerPassedTurnEvent"
+}
+
+type PlayerHasWonEvent struct {
+	Player            string
+	IsFromLocalClient bool
+}
+
+func (e *PlayerHasWonEvent) StringMessage(localPlayerName string) string {
+	playerName, you := changeIfSelf(e.Player, localPlayerName)
+	if you {
+		return fmt.Sprintf("%s are the winner", playerName)
+	}
+	return fmt.Sprintf("%s is the winner", playerName)
+}
+
+func (e PlayerHasWonEvent) FromLocalClient() bool {
+	return e.IsFromLocalClient
+}
+
+func (e PlayerHasWonEvent) GameEventName() string {
+	return "PlayerHasWonEvent"
 }
