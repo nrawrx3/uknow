@@ -12,7 +12,7 @@ type Number int
 
 type Card struct {
 	Number Number
-	Color  Color
+	Color
 }
 
 func (c *Card) String() string {

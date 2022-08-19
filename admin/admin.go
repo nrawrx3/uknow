@@ -535,8 +535,9 @@ func (admin *Admin) startNewTurn() {
 // Call this to broadcast the event to all players. We can essentially send any
 // []byte, but we make a decision to use this to only send event messages.
 func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath string, requestStruct interface{}) error {
-	ctx, _ = context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
+	ctx, cancelFunc := context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
 	g, ctx := errgroup.WithContext(ctx)
+	defer cancelFunc()
 
 	for playerName, playerAddr := range admin.listenAddrOfPlayer {
 		playerName := playerName
