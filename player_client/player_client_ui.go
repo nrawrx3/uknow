@@ -13,12 +13,14 @@ import (
 	"github.com/rksht/uknow"
 )
 
-type uiAction int
+//go:generate stringer -type=UIAction
+type UIAction int
 
 const (
-	uiDrawn uiAction = iota
-	uiRedraw
-	uiClearRedraw
+	uiDrawn UIAction = iota
+	uiRedrawGrid
+	uiClearRedrawGrid
+	uiHalt
 	uiStop
 )
 
@@ -58,7 +60,9 @@ type ClientUI struct {
 	// rw is protected by the uiActionMutex
 	uiActionMutex     sync.Mutex // protects access to every widget object
 	uiActionCond      *sync.Cond // used to signal to UI goro that widget data has been updated and should be drawn
-	action            uiAction
+	action            UIAction
+	windowWidth       int
+	windowHeight      int
 	grid              *ui.Grid
 	pileList          *widgets.List
 	commandPromptCell *widgets.Paragraph
@@ -84,7 +88,7 @@ type ClientUI struct {
 	Logger *log.Logger
 }
 
-func (clientUI *ClientUI) notifyRedrawUI(action uiAction, exec func()) {
+func (clientUI *ClientUI) notifyRedrawUI(action UIAction, exec func()) {
 	clientUI.uiActionCond.L.Lock()
 	defer clientUI.uiActionCond.L.Unlock()
 	exec()
@@ -117,17 +121,17 @@ func (clientUI *ClientUI) handleCommandInput(playerName string) {
 		defer clientUI.Logger.Printf("Done sending command to clientUI.decisionReplCommandConsumerChan")
 		clientUI.decisionReplCommandConsumerChan <- command
 	} else {
-		clientUI.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
+		// clientUI.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
 		clientUI.GeneralReplCommandPushChan <- command
 
-		clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
+		// clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
 	}
 	clientUI.commandHistoryPos.Push(clientUI.commandHistory, clientUI.commandStringBeingTyped)
 	clientUI.resetCommandPrompt("")
 }
 
 func (clientUI *ClientUI) appendEventLog(s string) {
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.appendEventLogNoLock(s)
 	})
 }
@@ -159,7 +163,7 @@ func (clientUI *ClientUI) appendCommandPrompt(s string) {
 	clientUI.commandPromptMutex.Lock()
 	defer clientUI.commandPromptMutex.Unlock()
 	clientUI.commandStringBeingTyped += s
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", clientUI.commandStringBeingTyped)
 	})
 }
@@ -172,14 +176,14 @@ func (clientUI *ClientUI) backspaceCommandPrompt() {
 		clientUI.commandStringBeingTyped = clientUI.commandStringBeingTyped[0 : n-1]
 	}
 
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", clientUI.commandStringBeingTyped)
 	})
 }
 
 func (clientUI *ClientUI) resetCommandPrompt(text string) {
 	clientUI.commandStringBeingTyped = text
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", text)
 	})
 }
@@ -287,6 +291,8 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 	clientUI.discardPileCells = make([]interface{}, 0, numCardsToShowInPile)
 	for i := 0; i < numCardsToShowInPile; i++ {
+		// TODO: Perhaps we can use widgets.List instead of all this
+		// manual management with widgets.Paragraph and ui.Rows??
 		p := widgets.NewParagraph()
 		p.Text = "_"
 		p.Title = ""
@@ -347,7 +353,7 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 	clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
 
 	clientUI.uiActionCond = sync.NewCond(&clientUI.uiActionMutex)
-	clientUI.action = uiRedraw
+	clientUI.action = uiRedrawGrid
 
 	clientUI.initWidgetObjects()
 
@@ -360,6 +366,14 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 	termWidth, termHeight := ui.TerminalDimensions()
 	clientUI.grid.SetRect(0, 0, termWidth, termHeight)
 
+	clientUI.embedWidgetsInGrid()
+
+	clientUI.LogWindowPullChan = logWindowChan
+
+	clientUI.decisionReplCommandConsumerChan = make(chan *ReplCommand)
+}
+
+func (clientUI *ClientUI) embedWidgetsInGrid() {
 	pileCellRows := make([]interface{}, 0, numCardsToShowInPile)
 	sizePerPileCell := 1.0 / numCardsToShowInPile
 	for _, pileCell := range clientUI.discardPileCells {
@@ -375,10 +389,6 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 		ui.NewRow(0.08, clientUI.selfHandWidget),
 		ui.NewRow(0.1, clientUI.commandPromptCell),
 	)
-
-	clientUI.LogWindowPullChan = logWindowChan
-
-	clientUI.decisionReplCommandConsumerChan = make(chan *ReplCommand)
 }
 
 func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
@@ -387,7 +397,7 @@ func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
 		case *UICommandSetServedCards:
 			clientUI.appendEventLog("Received UICommandSetServedCards")
 
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.drawDeckGauge.Percent = cmd.table.DrawDeck.Len()
 				clientUI.initTableElements(cmd.table, localPlayerName)
 			})
@@ -417,7 +427,9 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				clientUI.notifyRedrawUI(uiStop, func() {})
 			case "<Resize>":
 				payload := e.Payload.(ui.Resize)
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+					clientUI.windowWidth = payload.Width
+					clientUI.windowHeight = payload.Height
 					clientUI.grid.SetRect(0, 0, payload.Width, payload.Height)
 				})
 			case "<Enter>":
@@ -455,7 +467,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 			clientUI.stateMutex.Unlock()
 
 			// Change the UI style a bit to make it obvious it's the local player's turn
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorBlue
 				clientUI.commandPromptCell.TextStyle.Fg = ui.ColorBlue
 				clientUI.drawDeckGauge.BarColor = ui.ColorBlue
@@ -464,7 +476,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 
 			go func() {
 				if askUserForDecisionCommand.LocalPlayerCanChallenge() {
-					clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 						clientUI.commandPromptCell.Title = fmt.Sprintf("challenge or no_challenge %s?", askUserForDecisionCommand.challengeablePlayer)
 					})
 
@@ -482,13 +494,13 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 						// CONSIDER(@rk): Does it make sense to show a bit more fancy signal in case he makes an illegal decision?
 
 						go func() {
-							clientUI.notifyRedrawUI(uiRedraw, func() {
+							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 								clientUI.drawDeckGauge.BarColor = ui.ColorRed
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorRed
 
 							})
 							<-time.After(2 * time.Second)
-							clientUI.notifyRedrawUI(uiRedraw, func() {
+							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 								clientUI.drawDeckGauge.BarColor = ui.ColorBlue
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorWhite
 							})
@@ -511,7 +523,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				clientUI.appendEventLog("Done accepting decision commands in REPL")
 
 				// Reset the UI style as the local player's turn is over
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 					clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
 					clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
 					clientUI.drawDeckGauge.BarColor = ui.ColorWhite
@@ -531,7 +543,7 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 		case uknow.CardTransferEvent:
 			// clientUI.Logger.Printf("received")
 
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.handleCardTransferEvent(event, localPlayerName)
 			})
 
@@ -542,23 +554,15 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 
 		case uknow.ChallengerSuccessEvent:
 			if event.FromLocalClient() { // Set challenge result info as command prompt
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 					clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards", event.WildDraw4PlayerName)
 				})
-
-				// // Reset after a bit
-				// go func() {
-				// 	<-time.After(5 * time.Second)
-				// 	clientUI.notifyRedrawUI(uiRedraw, func() {
-				// 		clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
-				// 	})
-				// }()
 			}
 
 		case uknow.ChallengerFailedEvent:
 			if event.FromLocalClient() {
 				// Set challenge result info as command prompt
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 					clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4"
 				})
 
@@ -568,7 +572,7 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 
 		case uknow.AwaitingPlayOrPassEvent:
 			if event.FromLocalClient() {
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 					clientUI.commandPromptCell.Title = "Please play a card or pass"
 				})
 			}
@@ -578,6 +582,9 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 				clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
 			}
 
+		case uknow.PlayerHasWonEvent:
+			clientUI.showPlayerWinLayout(event.Player, localPlayerName)
+
 		default:
 			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
 			clientUI.appendEventLog("<Unknown game event received>")
@@ -585,9 +592,26 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 	}
 }
 
+func (clientUI *ClientUI) showPlayerWinLayout(winningPlayer, localPlayerName string) {
+	clientUI.Logger.Printf("will show player win layout")
+
+	winnerInfoParagraph := widgets.NewParagraph()
+	winnerInfoParagraph.Text = fmt.Sprintf("%s WINS THE GAME", winningPlayer)
+	winnerInfoParagraph.PaddingLeft = (clientUI.windowWidth / 2) / 2
+	winnerInfoParagraph.PaddingTop = clientUI.windowHeight / 2
+
+	clientUI.notifyRedrawUI(uiHalt, func() {
+		clientUI.Logger.Printf("HERE")
+		// clientUI.grid.Set(ui.NewRow(1.0, winnerInfoParagraph))
+		ui.Clear()
+		// ui.Render(clientUI.grid)
+		ui.Render(winnerInfoParagraph)
+	})
+}
+
 func (clientUI *ClientUI) runResetCommandPromptTitle(timeout time.Duration) {
 	<-time.After(timeout)
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
 	})
 }
@@ -652,6 +676,7 @@ func (clientUI *ClientUI) addToHandCountChart(playerName string, cardCount int) 
 // Runs in own thread.
 func (clientUI *ClientUI) RunDrawLoop() {
 	ui.Render(clientUI.grid)
+	halt := false
 	for i := 0; ; i++ {
 		clientUI.uiActionCond.L.Lock()
 		for clientUI.action == uiDrawn {
@@ -663,15 +688,24 @@ func (clientUI *ClientUI) RunDrawLoop() {
 			return
 		}
 
+		if halt {
+			continue
+		}
+
+		clientUI.Logger.Printf("Received UI action: %s", clientUI.action)
+
 		switch clientUI.action {
+		case uiHalt:
+			clientUI.action = uiHalt
+			halt = true
 		case uiStop:
 			clientUI.uiActionCond.L.Unlock()
 			return
-		case uiClearRedraw:
+		case uiClearRedrawGrid:
 			ui.Clear()
 			ui.Render(clientUI.grid)
 			clientUI.action = uiDrawn
-		case uiRedraw:
+		case uiRedrawGrid:
 			// clientUI.Logger.Printf("Redrawing UI")
 			ui.Render(clientUI.grid)
 			clientUI.action = uiDrawn

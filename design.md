@@ -175,3 +175,9 @@ Here `s_enter_wild_card_feedback` denotes a state where the table is expecting a
 
 What about `wild_draw_4`?
 
+
+
+
+## Win condition
+
+A player has no cards left. Can only happen after a player has dropped a card.

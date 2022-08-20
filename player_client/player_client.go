@@ -419,7 +419,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		sender:             "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
 	}
 
-	if c.table.TurnStateTag == uknow.AwaitingWildDraw4ChallengeDecision {
+	if c.table.TableState == uknow.AwaitingWildDraw4ChallengeDecision {
 		askCommand.SetChallengeablePlayer(c.table.PlayerOfLastTurn)
 	}
 
@@ -435,7 +435,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		if err != nil {
 			var errEvalDecision *uknow.EvalDecisionError
 			if errors.As(err, &errEvalDecision) {
-				msg := fmt.Sprintf("invalid decision, eligible decisions are: %s", uknow.EligibleCommandsAtState(c.table.TurnStateTag))
+				msg := fmt.Sprintf("invalid decision, eligible decisions are: %s", uknow.EligibleCommandsAtState(c.table.TableState))
 				c.Logger.Printf(msg)
 				c.logToWindow(msg)
 			} else {

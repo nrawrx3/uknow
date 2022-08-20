@@ -265,19 +265,19 @@ func (d Deck) MustFindCard(wantedCard Card) int {
 	panic(fmt.Sprintf("Could not find card '%s' in given deck", wantedCard.String()))
 }
 
-type TurnStateTag string
+type TableState string
 
 // TODO(@rk): Remove unused tags
 const (
-	StartOfTurn                        TurnStateTag = "start_of_turn"
-	AwaitingDropOrPass                 TurnStateTag = "awaiting_drop_or_pass"
-	AwaitingWildCardColorDecision      TurnStateTag = "awaiting_wild_card_color_choice"
-	AwaitingWildDraw4CardColorDecision TurnStateTag = "awaiting_wild_draw4_card_color_choice"
-	AwaitingWildDraw4ChallengeDecision TurnStateTag = "awaiting_wild_draw_4_challenge_choice"
-	HaveWinner                         TurnStateTag = "have_winner"
+	StartOfTurn                        TableState = "start_of_turn"
+	AwaitingDropOrPass                 TableState = "awaiting_drop_or_pass"
+	AwaitingWildCardColorDecision      TableState = "awaiting_wild_card_color_choice"
+	AwaitingWildDraw4CardColorDecision TableState = "awaiting_wild_draw4_card_color_choice"
+	AwaitingWildDraw4ChallengeDecision TableState = "awaiting_wild_draw_4_challenge_choice"
+	HaveWinner                         TableState = "have_winner"
 )
 
-func EligibleCommandsAtState(turnState TurnStateTag) string {
+func EligibleCommandsAtState(turnState TableState) string {
 	switch turnState {
 	case StartOfTurn:
 		return "play a card or pull from deck"
@@ -307,19 +307,14 @@ type Table struct {
 	PlayerOfLastTurn string          `json:"player_of_last_turn"`
 	Direction        int             `json:"direction"`
 	TurnsCompleted   int             `json:"turns_completed"`
-	TurnStateTag
+	TableState
 	IsShuffled                  bool   `json:"is_shuffled"`
 	RequiredColorOfCurrentTurn  Color  `json:"required_color"`
 	RequiredColorOfLastTurn     Color  `json:"required_color_of_last_turn"`
 	RequiredNumberOfCurrentTurn Number `json:"required_number_of_current_turn"`
 	RequiredNumberOfLastTurn    Number `json:"required_number_of_last_turn"`
 	RequiredNumberBeforeWild4   Number `json:"required_number_before_wild_4"`
-
-	// ^ We cannot determine elligible play card color simply from top of
-	// discard pile since wild card player enfoces a specific color for next
-	// player. This field is to be kept in sync whenever a player discards a
-	// card
-	WinnerPlayerName string
+	WinnerPlayerName            string
 }
 
 func NewTable(localPlayerName string, logger *log.Logger) *Table {
@@ -405,7 +400,7 @@ func createNewTable(logger *log.Logger) *Table {
 		PlayerNames:   make([]string, 0, 16),
 		Direction:     1,
 		Logger:        logger,
-		TurnStateTag:  StartOfTurn,
+		TableState:    StartOfTurn,
 	}
 }
 
@@ -646,9 +641,9 @@ var ErrIllegalPlayCard = errors.New("card illegal")
 var ErrUnexpectedDecision = errors.New("unexpected decision")
 
 func (t *Table) NeedMoreUserDecisionToFinishTurn() bool {
-	res := t.TurnStateTag == AwaitingWildCardColorDecision ||
-		t.TurnStateTag == AwaitingWildDraw4CardColorDecision ||
-		t.TurnStateTag == AwaitingDropOrPass
+	res := t.TableState == AwaitingWildCardColorDecision ||
+		t.TableState == AwaitingWildDraw4CardColorDecision ||
+		t.TableState == AwaitingDropOrPass
 	t.Logger.Printf("Need more decision from %s? %v", t.LocalPlayerName, res)
 	return res
 }
@@ -660,7 +655,7 @@ func (t *Table) NeedMoreUserDecisionToFinishTurn() bool {
 func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecision, gameEventPushChan chan<- GameEvent) (PlayerDecision, error) {
 	switch decision.Kind {
 	case PlayerDecisionPullFromDeck:
-		if t.TurnStateTag != StartOfTurn {
+		if t.TableState != StartOfTurn {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrAlreadyDrewCard}
 		}
 
@@ -670,7 +665,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 		decision.ResultCard = topCard
-		t.TurnStateTag = AwaitingDropOrPass
+		t.TableState = AwaitingDropOrPass
 
 		gameEventPushChan <- AwaitingPlayOrPassEvent{
 			Player:                     decidingPlayer,
@@ -678,7 +673,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 	case PlayerDecisionPass:
-		if t.TurnStateTag != AwaitingDropOrPass {
+		if t.TableState != AwaitingDropOrPass {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrPassWithoutDrawOrDrop}
 		}
 
@@ -691,7 +686,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		}
 
 	case PlayerDecisionPlayHandCard:
-		if t.TurnStateTag != StartOfTurn && t.TurnStateTag != AwaitingDropOrPass {
+		if t.TableState != StartOfTurn && t.TableState != AwaitingDropOrPass {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrInvalidDecision}
 		}
 
@@ -703,7 +698,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		t.checkIfPlayerHasWon(decidingPlayer, decision.ResultCard, gameEventPushChan)
 
 	case PlayerDecisionWildCardChooseColor:
-		if t.TurnStateTag != AwaitingWildCardColorDecision && t.TurnStateTag != AwaitingWildDraw4CardColorDecision {
+		if t.TableState != AwaitingWildCardColorDecision && t.TableState != AwaitingWildDraw4CardColorDecision {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrUnexpectedDecision}
 		}
 
@@ -712,16 +707,16 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		t.Logger.Printf("Setting required color to wild card chosen color %s, previous color: %s", decision.WildCardChosenColor.String(), t.RequiredColorOfLastTurn.String())
 
 		// Two distinct cases for wild and wild_draw_4
-		if t.TurnStateTag == AwaitingWildCardColorDecision {
-			t.TurnStateTag = StartOfTurn
+		if t.TableState == AwaitingWildCardColorDecision {
+			t.TableState = StartOfTurn
 			t.setNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
 		} else {
-			t.TurnStateTag = AwaitingWildDraw4ChallengeDecision
+			t.TableState = AwaitingWildDraw4ChallengeDecision
 			t.setNeighborAsNextPlayer(decidingPlayer, AwaitingWildDraw4ChallengeDecision)
 		}
 
 	case PlayerDecisionDoChallenge:
-		if t.TurnStateTag != AwaitingWildDraw4ChallengeDecision {
+		if t.TableState != AwaitingWildDraw4ChallengeDecision {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrUnexpectedDecision}
 		}
 
@@ -771,7 +766,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 		t.setNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
 
 	case PlayerDecisionDontChallenge:
-		if t.TurnStateTag != AwaitingWildDraw4ChallengeDecision {
+		if t.TableState != AwaitingWildDraw4ChallengeDecision {
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrUnexpectedDecision}
 		}
 
@@ -783,11 +778,11 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 	return decision, nil
 }
 
-func (t *Table) setNeighborAsNextPlayer(currentPlayer string, nextState TurnStateTag) {
+func (t *Table) setNeighborAsNextPlayer(currentPlayer string, nextState TableState) {
 	playerIndex := t.PlayerIndexFromName(currentPlayer)
 	nextPlayerIndex := t.GetNextPlayerIndex(playerIndex, t.Direction)
 	t.SetPlayerOfNextTurn(t.PlayerNames[nextPlayerIndex])
-	t.TurnStateTag = nextState
+	t.TableState = nextState
 
 	t.Logger.Printf("Setting next player: %s, current player: %s", t.PlayerOfNextTurn, currentPlayer)
 }
@@ -870,7 +865,7 @@ func (t *Table) tryPlayCard(decidingPlayer string, cardToPlay Card, gameEventPus
 	} else {
 		// TODO(@rk): Better to handle in a separate function for all non-action card plays.
 		t.setNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
-		t.TurnStateTag = StartOfTurn
+		t.TableState = StartOfTurn
 		t.SetRequiredColor(cardToPlay.Color)
 		t.SetRequiredNumber(cardToPlay.Number)
 	}
@@ -901,7 +896,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 	switch actionCard.Number {
 	case NumberSkip:
 		skippedPlayer, nextPlayer := t.setNextPlayerSkipOne(decidingPlayer)
-		t.TurnStateTag = StartOfTurn
+		t.TableState = StartOfTurn
 		t.SetRequiredColor(actionCard.Color)
 		t.SetRequiredNumber(actionCard.Number)
 
@@ -918,7 +913,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 
 	case NumberDrawTwo:
 		skippedPlayer, nextPlayer := t.setNextPlayerSkipOne(decidingPlayer)
-		t.TurnStateTag = StartOfTurn
+		t.TableState = StartOfTurn
 		t.SetRequiredColor(actionCard.Color)
 		t.SetRequiredNumber(actionCard.Number)
 
@@ -953,7 +948,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 
 		t.SetPlayerOfNextTurn(t.PlayerNames[nextPlayerIndex])
 		deniedPlayer := t.PlayerNames[deniedPlayerIndex]
-		t.TurnStateTag = StartOfTurn
+		t.TableState = StartOfTurn
 		t.SetRequiredColor(actionCard.Color)
 		t.SetRequiredNumber(actionCard.Number)
 
@@ -969,7 +964,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 		gameEventPushChan <- event
 
 	case NumberWild:
-		t.TurnStateTag = AwaitingWildCardColorDecision
+		t.TableState = AwaitingWildCardColorDecision
 		t.SetRequiredNumber(NumberWild)
 		// NOTE: We don't set ever required color to wild. Chosen color will be decided by another decision next.
 
@@ -983,7 +978,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 		gameEventPushChan <- event
 
 	case NumberWildDrawFour:
-		t.TurnStateTag = AwaitingWildDraw4CardColorDecision
+		t.TableState = AwaitingWildDraw4CardColorDecision
 
 		// EXPLAIN(@rk): Since we're looking for eligible cards _after_
 		// the user challenges, we need to store this. This state needs

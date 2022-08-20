@@ -12,10 +12,6 @@ import (
 	"github.com/rksht/uknow"
 )
 
-// `ReplCommandKind` represents a client command. Both UI and Admin can send these commands to the PlayerClient to do an action.
-//go:generate stringer -type=ReplCommandKind
-type ReplCommandKind int
-
 const (
 	ReservedNameDeck          = "<deck>"
 	ReservedNamePile          = "<pile>"
@@ -23,6 +19,11 @@ const (
 	ReservedNameClient        = "<player_client>"
 	ReservedNameCommandPrompt = "<command_prompt>"
 )
+
+// `ReplCommandKind` represents a client command. Both UI and Admin can send these commands to the PlayerClient to do an action.
+//
+//go:generate stringer -type=ReplCommandKind
+type ReplCommandKind int
 
 const (
 	CmdNone          ReplCommandKind = iota
