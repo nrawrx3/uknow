@@ -8,16 +8,15 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[uiDrawn-0]
+	_ = x[uiUpdated-0]
 	_ = x[uiRedrawGrid-1]
 	_ = x[uiClearRedrawGrid-2]
-	_ = x[uiHalt-3]
-	_ = x[uiStop-4]
+	_ = x[uiStop-3]
 }
 
-const _UIAction_name = "uiDrawnuiRedrawGriduiClearRedrawGriduiHaltuiStop"
+const _UIAction_name = "uiUpdateduiRedrawGriduiClearRedrawGriduiStop"
 
-var _UIAction_index = [...]uint8{0, 7, 19, 36, 42, 48}
+var _UIAction_index = [...]uint8{0, 9, 21, 38, 44}
 
 func (i UIAction) String() string {
 	if i < 0 || i >= UIAction(len(_UIAction_index)-1) {

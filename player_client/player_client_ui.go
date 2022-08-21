@@ -17,10 +17,9 @@ import (
 type UIAction int
 
 const (
-	uiDrawn UIAction = iota
+	uiUpdated UIAction = iota
 	uiRedrawGrid
 	uiClearRedrawGrid
-	uiHalt
 	uiStop
 )
 
@@ -29,6 +28,7 @@ type ClientUIState string
 const (
 	ClientUIOnlyAllowInspectReplCommands    ClientUIState = "only_allow_inspect_repl_commands"
 	ClientUIAllowPlayerDecisionReplCommands ClientUIState = "allow_player_decision_repl_commands"
+	ClientUIWeHaveAWinner                   ClientUIState = "we_have_a_winner"
 )
 
 const maxLinesInEventLog = 50
@@ -88,7 +88,8 @@ type ClientUI struct {
 	Logger *log.Logger
 }
 
-func (clientUI *ClientUI) notifyRedrawUI(action UIAction, exec func()) {
+func (clientUI *ClientUI) notifyRedrawUI(action UIAction, exec func(), debugMessage ...string) {
+	clientUI.Logger.Printf("notifyRedrawUI: %s, %v", action, debugMessage)
 	clientUI.uiActionCond.L.Lock()
 	defer clientUI.uiActionCond.L.Unlock()
 	exec()
@@ -460,9 +461,14 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 			}
 
 		case askUserForDecisionCommand := <-clientUI.AskUserForDecisionPullChan:
-			clientUI.appendEventLog("It's your turn! Time to make decision")
-
 			clientUI.stateMutex.Lock()
+
+			if clientUI.uiState == ClientUIWeHaveAWinner {
+				clientUI.stateMutex.Unlock()
+				clientUI.appendEventLog("Not processing user decision since we have a winner")
+				continue
+			}
+
 			clientUI.uiState = ClientUIAllowPlayerDecisionReplCommands
 			clientUI.stateMutex.Unlock()
 
@@ -518,17 +524,19 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				close(askUserForDecisionCommand.receive)
 
 				clientUI.stateMutex.Lock()
-				clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
-				clientUI.stateMutex.Unlock()
-				clientUI.appendEventLog("Done accepting decision commands in REPL")
+				if clientUI.uiState != ClientUIWeHaveAWinner {
+					clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
+					clientUI.appendEventLog("Done accepting decision commands in REPL")
 
-				// Reset the UI style as the local player's turn is over
-				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
-					clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
-					clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
-					clientUI.drawDeckGauge.BarColor = ui.ColorWhite
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
-				})
+					// Reset the UI style as the local player's turn is over
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+						clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
+						clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
+						clientUI.drawDeckGauge.BarColor = ui.ColorWhite
+						clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+					})
+				}
+				clientUI.stateMutex.Unlock()
 			}()
 
 		case logMessage := <-clientUI.LogWindowPullChan:
@@ -579,41 +587,46 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 
 		case uknow.PlayerPassedTurnEvent:
 			if event.IsFromLocalClient {
-				clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+				clientUI.stateMutex.Lock()
+
+				if clientUI.uiState != ClientUIWeHaveAWinner {
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() { clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle })
+				}
+
+				clientUI.stateMutex.Unlock()
 			}
 
 		case uknow.PlayerHasWonEvent:
-			clientUI.showPlayerWinLayout(event.Player, localPlayerName)
+			clientUI.stateMutex.Lock()
+			clientUI.uiState = ClientUIWeHaveAWinner
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+				clientUI.commandPromptCell.Title = event.StringMessage(localPlayerName)
+			}, event.Player, "won the game")
+			clientUI.stateMutex.Unlock()
 
 		default:
-			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
+			clientUI.Logger.Printf("UNKNOWN GAME EVENT: %s", event.GameEventName())
 			clientUI.appendEventLog("<Unknown game event received>")
 		}
 	}
 }
 
-func (clientUI *ClientUI) showPlayerWinLayout(winningPlayer, localPlayerName string) {
-	clientUI.Logger.Printf("will show player win layout")
+func (clientUI *ClientUI) runResetCommandPromptTitle(timeout time.Duration) {
+	<-time.After(timeout)
 
-	winnerInfoParagraph := widgets.NewParagraph()
-	winnerInfoParagraph.Text = fmt.Sprintf("%s WINS THE GAME", winningPlayer)
-	winnerInfoParagraph.PaddingLeft = (clientUI.windowWidth / 2) / 2
-	winnerInfoParagraph.PaddingTop = clientUI.windowHeight / 2
+	clientUI.stateMutex.Lock()
+	defer clientUI.stateMutex.Unlock()
 
-	clientUI.notifyRedrawUI(uiHalt, func() {
-		clientUI.Logger.Printf("HERE")
-		// clientUI.grid.Set(ui.NewRow(1.0, winnerInfoParagraph))
-		ui.Clear()
-		// ui.Render(clientUI.grid)
-		ui.Render(winnerInfoParagraph)
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+		clientUI.setTurnBasedCommandPromptTitle(defaultCommandPromptCellTitle)
 	})
 }
 
-func (clientUI *ClientUI) runResetCommandPromptTitle(timeout time.Duration) {
-	<-time.After(timeout)
-	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
-		clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
-	})
+// Does not lock stateMutex
+func (clientUI *ClientUI) setTurnBasedCommandPromptTitle(title string) {
+	if clientUI.uiState != ClientUIWeHaveAWinner {
+		clientUI.commandPromptCell.Title = title
+	}
 }
 
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
@@ -676,39 +689,26 @@ func (clientUI *ClientUI) addToHandCountChart(playerName string, cardCount int) 
 // Runs in own thread.
 func (clientUI *ClientUI) RunDrawLoop() {
 	ui.Render(clientUI.grid)
-	halt := false
 	for i := 0; ; i++ {
 		clientUI.uiActionCond.L.Lock()
-		for clientUI.action == uiDrawn {
+		for clientUI.action == uiUpdated {
 			clientUI.uiActionCond.Wait()
-		}
-
-		if clientUI.action == uiStop {
-			clientUI.uiActionCond.L.Unlock()
-			return
-		}
-
-		if halt {
-			continue
 		}
 
 		clientUI.Logger.Printf("Received UI action: %s", clientUI.action)
 
 		switch clientUI.action {
-		case uiHalt:
-			clientUI.action = uiHalt
-			halt = true
 		case uiStop:
 			clientUI.uiActionCond.L.Unlock()
 			return
 		case uiClearRedrawGrid:
 			ui.Clear()
 			ui.Render(clientUI.grid)
-			clientUI.action = uiDrawn
+			clientUI.action = uiUpdated
 		case uiRedrawGrid:
 			// clientUI.Logger.Printf("Redrawing UI")
 			ui.Render(clientUI.grid)
-			clientUI.action = uiDrawn
+			clientUI.action = uiUpdated
 		default:
 			clientUI.Logger.Fatalf("Invalid action value\n")
 		}

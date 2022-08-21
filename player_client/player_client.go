@@ -116,7 +116,7 @@ func (c *PlayerClient) RunServer() {
 	c.Logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
 	err := c.httpServer.ListenAndServe()
 	if err != nil {
-		log.Fatalf("PlayerClient.RunServer() failed: %s", err.Error())
+		log.Panicf("PlayerClient.RunServer() failed: %s", err.Error())
 	}
 }
 
