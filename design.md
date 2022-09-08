@@ -1,15 +1,8 @@
 # Uknow design
 
-Have a server idiot. Replicate THAT. Not the fucking clients. Idiot.
+## Documentation
 
-
-Server has all the game logic. Just asks player to execute a command. 
-
-
-Console - which is the "client" just executes commands based on what the gameserver decides. The gameserver will sometimes ask for player input to the console.
-
-
-
+TODO: Write documentation.
 
 ## Client and server timeouts and keep_alive connections
 
@@ -181,3 +174,15 @@ What about `wild_draw_4`?
 ## Win condition
 
 A player has no cards left. Can only happen after a player has dropped a card.
+
+
+## Admin server
+
+Multiple admins in one server process. A superuser should create a new admin when he wants to play a new game.
+
+Or is that a bad idea?
+
+
+## Deploy to cloud server
+
+Deployment should be done via a script.
