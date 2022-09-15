@@ -33,7 +33,7 @@ const (
 	// Non-decision commands
 	CmdQuit
 	CmdConnect
-	CmdTableInfo
+	CmdTableSummary
 	CmdShowHand // Might delete since we want to show hand at all times in the UI in the MVP
 
 	// Player decision commands. Add new decision commands to the _middle_ of the list, or update IsUserDecisionCommand function.
@@ -195,8 +195,8 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.ExtraData = nil
 		return s.Scan(), command, nil
 
-	case "table_info":
-		command.Kind = CmdTableInfo
+	case "table_summary":
+		command.Kind = CmdTableSummary
 		return s.Scan(), command, nil
 
 	case "showhand":

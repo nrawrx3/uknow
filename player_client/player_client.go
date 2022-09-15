@@ -205,7 +205,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 			// Just printing to event log window
 			c.logToWindow(c.table.HandOfPlayer[c.table.LocalPlayerName].String())
 
-		case CmdTableInfo:
+		case CmdTableSummary:
 			c.logToWindow("--- table_info:")
 			c.logToWindow(fmt.Sprintf(`client_state: %s`, c.clientState))
 			c.logToWindow(c.table.Summary())
@@ -269,8 +269,7 @@ func (c *PlayerClient) initRouterHandlers() {
 		fmt.Fprintf(w, "pong")
 	})
 
-	// NOTE(@rk): Event the message handlers and paths convention. Starts with "/event"
-
+	// CONVENTION(@rk): See EventMessage for the convention we're using
 	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardsEvent)
 	c.router.Path("/event/chosen_player").Methods("POST").HandlerFunc(c.handleChosenPlayerEvent)
 	c.router.Path("/event/player_decisions_sync").Methods("POST").HandlerFunc(c.handlePlayerDecisionsSyncEvent)

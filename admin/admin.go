@@ -43,6 +43,7 @@ const (
 	WaitingForChallengePlayerDecision AdminState = "waiting_for_challenge"
 	SyncingPlayerDecision             AdminState = "syncing_player_decision"
 	DoneSyncingPlayerDecision         AdminState = "done_syncing_player_decision"
+	HaveWinner                        AdminState = "have_winner"
 )
 
 func playerWithAddress(addr utils.TCPAddress, listenAddrOfPlayer map[string]utils.TCPAddress) (string, error) {
@@ -81,6 +82,8 @@ type Admin struct {
 	decisionEventsCompleted int
 
 	expectedAcksList *expectedAcksList
+	readlinePrompt   string
+	rl               *readline.Instance
 }
 
 type ConfigNewAdmin struct {
@@ -93,14 +96,15 @@ type ConfigNewAdmin struct {
 const logFilePrefix = "admin"
 
 func NewAdmin(config *ConfigNewAdmin) *Admin {
+	logger := uknow.CreateFileLogger(false, logFilePrefix)
 	admin := &Admin{
 		table:              config.Table,
 		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
 		shuffler:           "",
 		aesCipher:          config.aesCipher,
 		state:              AddingPlayers,
-		expectedAcksList:   newExpectedAcksState(),
-		logger:             uknow.CreateFileLogger(false, logFilePrefix),
+		expectedAcksList:   newExpectedAcksState(logger),
+		logger:             logger,
 		setReadyPlayer:     config.SetReadyPlayer,
 	}
 
@@ -131,18 +135,18 @@ func (admin *Admin) setRouterHandlers() *mux.Router {
 	return r
 }
 
-func (a *Admin) Restart() {
-	a.stateMutex.Lock()
-	defer a.stateMutex.Unlock()
+func (admin *Admin) Restart() {
+	admin.stateMutex.Lock()
+	defer admin.stateMutex.Unlock()
 
-	a.table = createStartingTable(&envConfig)
+	admin.table = createStartingTable(&envConfig)
 
-	a.logger = uknow.CreateFileLogger(false, logFilePrefix)
+	admin.logger = uknow.CreateFileLogger(false, logFilePrefix)
 
-	a.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
-	a.shuffler = ""
-	a.state = AddingPlayers
-	a.expectedAcksList = newExpectedAcksState()
+	admin.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
+	admin.shuffler = ""
+	admin.state = AddingPlayers
+	admin.expectedAcksList = newExpectedAcksState(admin.logger)
 
 	log.Print("Admin restarted...")
 }
@@ -151,6 +155,8 @@ func (admin *Admin) RunServer() {
 	admin.logger.Printf("Running admin server at addr: %s", admin.httpServer.Addr)
 	go admin.expectedAcksList.waitForAcks()
 	err := admin.httpServer.ListenAndServe()
+
+	admin.updatePromptWithStateInfo()
 	if err != nil {
 		log.Fatalf("Admin.RunServer() failed: %s", err.Error())
 	}
@@ -414,7 +420,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	admin.state = ReadyToServeCards
+	admin.setState(ReadyToServeCards)
 
 	// shuffle and serve cards. then sync the table state with each player.
 	admin.table.ShufflerName = setReadyMessage.ShufflerName
@@ -485,11 +491,9 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 	// Evaluate the decisions on the admin table
 	admin.stateMutex.Lock()
 	admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.DecidingPlayer, syncEvent.Decisions)
-	admin.state = SyncingPlayerDecision
+	admin.setState(SyncingPlayerDecision)
+	admin.updatePromptWithStateInfo()
 	admin.stateMutex.Unlock()
-
-	// TODO(@rk): Here we need to check table state and see if any player
-	// has won the game.
 
 	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
 	if err != nil {
@@ -499,13 +503,12 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 	}
 
 	admin.stateMutex.Lock()
-	defer admin.stateMutex.Unlock()
-
 	admin.decisionEventsCompleted++
-	admin.state = DoneSyncingPlayerDecision
-	// TODO(@rk): Don't really need to start new goroutine for runNewTurn(),
-	// although it does keep the logic separate.
-	go admin.runNewTurn()
+	admin.setState(DoneSyncingPlayerDecision)
+	admin.stateMutex.Unlock()
+
+	// already inside a goroutine, so we don't need to spawn a new one for runNewTurn()
+	admin.runNewTurn()
 }
 
 func (admin *Admin) runNewTurn() {
@@ -516,20 +519,22 @@ func (admin *Admin) runNewTurn() {
 
 	<-time.After(time.Duration(envConfig.PauseMsecsBeforeNewTurn) * time.Millisecond)
 
-	log.Printf("Starting new turn...")
-	admin.startNewTurn()
-}
-
-func (admin *Admin) startNewTurn() {
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
 
-	if admin.state != DoneSyncingPlayerDecision {
-		admin.logger.Fatalf("startNewTurn: Unexpected state: %s", admin.state)
-	}
+	if admin.table.TableState == uknow.HaveWinner {
+		log.Printf("Have winner: %s", admin.table.WinnerPlayerName)
+		admin.setState(HaveWinner)
+	} else {
+		admin.logger.Printf("Starting new turn...")
 
-	admin.state = PlayerChosenForTurn
-	go admin.sendChosenPlayerEventToAllPlayers()
+		if admin.state != DoneSyncingPlayerDecision {
+			admin.logger.Fatalf("startNewTurn: Unexpected state: %s", admin.state)
+		}
+
+		admin.setState(PlayerChosenForTurn)
+		go admin.sendChosenPlayerEventToAllPlayers()
+	}
 }
 
 // Call this to broadcast the event to all players. We can essentially send any
@@ -606,7 +611,7 @@ func (admin *Admin) sendServeCardsEventToAllPlayers() {
 
 	admin.logger.Printf("sendServeCardsEventToAllPlayers success")
 
-	admin.state = CardsServed
+	admin.setState(CardsServed)
 	go admin.sendChosenPlayerEventToAllPlayers()
 }
 
@@ -635,7 +640,7 @@ func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
 
 	admin.logger.Printf("sendChosenPlayerEventToAllPlayers success")
 
-	admin.state = WaitingForPlayerDecision
+	admin.setState(WaitingForPlayerDecision)
 
 	admin.expectedAcksList.addPending(
 		expectedAck{
@@ -670,15 +675,50 @@ func (admin *Admin) setReady() {
 	admin.expectedAcksList.mu.Unlock()
 }
 
+func (admin *Admin) setState(state AdminState) {
+	admin.state = state
+	admin.updatePromptWithStateInfo()
+}
+
+func (admin *Admin) updatePromptWithStateInfo() {
+	if admin.rl == nil {
+		return
+	}
+
+	switch admin.state {
+	case AddingPlayers:
+		admin.rl.SetPrompt("[adding_players]> ")
+	case ReadyToServeCards:
+		admin.rl.SetPrompt("[ready_to_serve_cards]> ")
+	case CardsServed:
+		admin.rl.SetPrompt("[cards_served]> ")
+	case PlayerChosenForTurn:
+		admin.rl.SetPrompt(fmt.Sprintf("[player_chosen_for_turn:%s]> ", admin.table.PlayerOfNextTurn))
+	case WaitingForPlayerDecision:
+		admin.rl.SetPrompt(fmt.Sprintf("[waiting_for_player_decision:%s]> ", admin.table.PlayerOfNextTurn))
+	case WaitingForChallengePlayerDecision:
+		admin.rl.SetPrompt(fmt.Sprintf("[waiting_for_challenge_decision:%s]> ", admin.table.PlayerOfNextTurn))
+	case SyncingPlayerDecision:
+		admin.rl.SetPrompt(fmt.Sprintf("[syncing_player_decision:%s]> ", admin.table.PlayerOfNextTurn))
+	case DoneSyncingPlayerDecision:
+		admin.rl.SetPrompt(fmt.Sprintf("[done_syncing_player_decision:(decider:%s, next:%s)]> ", admin.table.PlayerOfLastTurn, admin.table.PlayerOfNextTurn))
+	case HaveWinner:
+		admin.rl.SetPrompt(fmt.Sprintf("[have_winner:%s]> ", admin.table.WinnerPlayerName))
+	}
+
+	admin.rl.Write([]byte("\n"))
+}
+
 func (admin *Admin) RunREPL() {
-	rl, err := readline.New("> ")
+	var err error
+	admin.rl, err = readline.New("> ")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer rl.Close()
+	defer admin.rl.Close()
 
 	for {
-		line, err := rl.Readline()
+		line, err := admin.rl.Readline()
 		if err != nil {
 			break
 		}
