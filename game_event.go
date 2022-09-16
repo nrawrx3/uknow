@@ -48,7 +48,7 @@ func (c *CardTransferEvent) String(localPlayerName string) string {
 	sourceName, _ = changeIfSelf(sourceName, localPlayerName)
 	sinkName, _ = changeIfSelf(sinkName, localPlayerName)
 
-	return fmt.Sprintf("Card transfer from %s to %s", sourceName, sinkName)
+	return fmt.Sprintf("Card transfer from %s to %s, card: %s", sourceName, sinkName, c.Card.String())
 }
 
 func (c CardTransferEvent) FromLocalClient() bool {

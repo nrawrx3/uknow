@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -211,6 +212,12 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 			c.logToWindow(c.table.Summary())
 			c.logToWindow("---")
 
+		case CmdDumpDrawDeck:
+			var sb strings.Builder
+			c.table.PrintDrawDeck(&sb, cmd.Count)
+			c.logToWindow("--- Draw Deck:")
+			c.logToWindow(sb.String())
+
 		default:
 			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
 		}
@@ -269,7 +276,7 @@ func (c *PlayerClient) initRouterHandlers() {
 		fmt.Fprintf(w, "pong")
 	})
 
-	// CONVENTION(@rk): See EventMessage for the convention we're using
+	// CONVENTION(@rk): See EventMessage for the convention we're using.
 	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardsEvent)
 	c.router.Path("/event/chosen_player").Methods("POST").HandlerFunc(c.handleChosenPlayerEvent)
 	c.router.Path("/event/player_decisions_sync").Methods("POST").HandlerFunc(c.handlePlayerDecisionsSyncEvent)
@@ -526,6 +533,8 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 	c.Logger.Printf("Evaluating player %s's %d decisions: %+v", decisionsEvent.DecidingPlayer, len(decisionsEvent.Decisions), decisionsEvent)
 	c.table.EvalPlayerDecisions(decisionsEvent.DecidingPlayer, decisionsEvent.Decisions, c.GameEventPushChan)
 
+	c.Logger.Printf("Done evaluating player %s's %d decisions", decisionsEvent.DecidingPlayer, len(decisionsEvent.Decisions))
+
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
@@ -620,6 +629,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			_, exists := c.neighborListenAddr[playerName]
 			if exists || playerName == c.table.LocalPlayerName {
 				return nil
+
 			}
 
 			listenAddr := playerListenAddrs[i]

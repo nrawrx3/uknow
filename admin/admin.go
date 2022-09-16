@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,12 +114,11 @@ func NewAdmin(config *ConfigNewAdmin) *Admin {
 	r := admin.setRouterHandlers()
 
 	admin.httpServer = &http.Server{
-		Handler:           r,
-		Addr:              config.ListenAddr.BindString(),
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      5 * time.Second,
-		IdleTimeout:       1 * time.Minute,
-		ReadHeaderTimeout: 2 * time.Second,
+		Handler:      r,
+		Addr:         config.ListenAddr.BindString(),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  1 * time.Minute,
 	}
 
 	return admin
@@ -162,7 +162,11 @@ func (admin *Admin) RunServer() {
 	}
 }
 
+// Increase this timeout before debugging.
+// TODO: Have a config for this timeout
 const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
+
+// const allPlayersSyncCommandTimeout = time.Duration(10000) * time.Second
 
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
@@ -490,19 +494,21 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 
 	// Evaluate the decisions on the admin table
 	admin.stateMutex.Lock()
-	admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.DecidingPlayer, syncEvent.Decisions)
+	err := admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.DecidingPlayer, syncEvent.Decisions)
 	admin.setState(SyncingPlayerDecision)
 	admin.updatePromptWithStateInfo()
-	admin.stateMutex.Unlock()
 
-	err := admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
+	if err != nil {
+		admin.logger.Fatalf("ERROR while syncing decisions: %+v", err)
+	}
+
+	err = admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
 	if err != nil {
 		// TODO(@rk): Don't handle for now. Happy path only
 		admin.logger.Printf("Failed to broadcast player decisions event: %s", err)
 		return
 	}
 
-	admin.stateMutex.Lock()
 	admin.decisionEventsCompleted++
 	admin.setState(DoneSyncingPlayerDecision)
 	admin.stateMutex.Unlock()
@@ -744,11 +750,25 @@ func (admin *Admin) RunREPL() {
 			continue
 		}
 
-		if line == "table-summary" {
+		if line == "table_summary" {
 			admin.stateMutex.Lock()
 			log.Print(admin.table.Summary())
 			admin.stateMutex.Unlock()
 			continue
+		}
+
+		if line == "show_hands" {
+			var sb strings.Builder
+			admin.table.PrintHands(&sb)
+			admin.logger.Print(sb.String())
+			log.Print(sb.String())
+		}
+
+		if line == "dump_drawdeck" {
+			var sb strings.Builder
+			admin.table.PrintDrawDeck(&sb, 15)
+			admin.logger.Print(sb.String())
+			log.Print(sb.String())
 		}
 
 		if line == "set_ready" || line == "sr" {

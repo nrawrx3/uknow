@@ -34,6 +34,7 @@ const (
 	CmdQuit
 	CmdConnect
 	CmdTableSummary
+	CmdDumpDrawDeck
 	CmdShowHand // Might delete since we want to show hand at all times in the UI in the MVP
 
 	// Player decision commands. Add new decision commands to the _middle_ of the list, or update IsUserDecisionCommand function.
@@ -199,7 +200,21 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.Kind = CmdTableSummary
 		return s.Scan(), command, nil
 
-	case "showhand":
+	case "dump_drawdeck":
+		command.Kind = CmdDumpDrawDeck
+		countToken := s.Scan()
+		if countToken != scanner.Int {
+			return countToken, command, fmt.Errorf("missing count in command: dump_drawdeck <count>, have: %s", scanner.TokenString(countToken))
+		}
+		var err error
+		command.Count, err = strconv.Atoi(s.TokenText())
+		if err != nil {
+			return countToken, command, fmt.Errorf("%w: Failed to parse count in command:dump_drawdeck <count>", err)
+		}
+
+		return s.Scan(), command, nil
+
+	case "show_hand":
 		command.Kind = CmdShowHand
 		return s.Scan(), command, nil
 

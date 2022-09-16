@@ -162,9 +162,12 @@ What about `wild_draw_4`?
 
 
 
-## Win condition
+## Win condition and other cues in UI
 
-A player has no cards left. Can only happen after a player has dropped a card.
+- A player has no cards left. Can only happen after a player has dropped a card.
+
+- Better vis of current color required. Can be communicated to UI using dedicated game event.
+- Better vis of player of current turn. Same, can be communicated using dedicated game event.
 
 
 ## Admin server

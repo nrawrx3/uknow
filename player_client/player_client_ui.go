@@ -632,7 +632,7 @@ func (clientUI *ClientUI) setTurnBasedCommandPromptTitle(title string) {
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
 	// TODO(@rk): Don't show the card info if the card transfer is happening
 	// to hand of non local player
-	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s, card: %s", event.String(localPlayerName), localPlayerName, event.Card.String()))
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(localPlayerName), localPlayerName))
 
 	switch event.Source {
 	case uknow.CardTransferNodeDeck:
