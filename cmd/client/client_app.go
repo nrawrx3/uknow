@@ -114,5 +114,13 @@ func RunApp() {
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			ui.Clear()
+			ui.Close()
+			log.Printf("There was a panic: %v", r)
+		}
+	}()
+
 	RunApp()
 }

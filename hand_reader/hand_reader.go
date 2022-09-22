@@ -210,10 +210,11 @@ func makeTable(serializedJSON serializedJSON, table *uknow.Table, logger *log.Lo
 	}
 
 	table.RequiredColorOfCurrentTurn = table.DiscardedPile.MustTop().Color
+	table.RequiredNumberOfCurrentTurn = table.DiscardedPile.MustTop().Number
 	table.IsShuffled = true
 	table.PlayerOfNextTurn = serializedJSON.playerToDraw
 	table.PlayerOfLastTurn = serializedJSON.playerToDraw
-	table.TurnStateTag = uknow.StartOfTurn
+	table.TableState = uknow.StartOfTurn
 
 	return table, nil
 }

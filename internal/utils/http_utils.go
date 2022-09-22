@@ -31,7 +31,11 @@ func (t *TCPAddress) SetHostPort(host string, port int) {
 }
 
 func (t *TCPAddress) HTTPAddress() string {
-	return fmt.Sprintf("http://%s:%d", t.Host, t.Port)
+	if t.Port != 0 {
+		return fmt.Sprintf("http://%s:%d", t.Host, t.Port)
+	} else {
+		return fmt.Sprintf("http://%s", t.Host)
+	}
 }
 
 func (t *TCPAddress) String() string {
@@ -87,7 +91,7 @@ func CreateHTTPClient() *http.Client {
 	}
 
 	return &http.Client{
-		Timeout:   2 * time.Second,
+		Timeout:   20 * time.Second,
 		Transport: transport,
 	}
 }
@@ -99,18 +103,18 @@ type RequestSender struct {
 	BodyReader io.Reader
 }
 
-func (sender *RequestSender) SendWithTimeout(parentContext context.Context, timeout time.Duration) (*http.Response, error, context.CancelFunc) {
+func (sender *RequestSender) SendWithTimeout(parentContext context.Context, timeout time.Duration) (*http.Response, context.CancelFunc, error) {
 	ctx, cancel := context.WithTimeout(parentContext, timeout)
 
 	req, err := http.NewRequestWithContext(ctx, sender.Method, sender.URL, sender.BodyReader)
 	if err != nil {
-		return nil, err, cancel
+		return nil, cancel, err
 	}
 	resp, err := sender.Client.Do(req)
 	if err != nil {
-		return nil, err, cancel
+		return nil, cancel, err
 	}
-	return resp, nil, cancel
+	return resp, cancel, nil
 }
 
 func (sender *RequestSender) Send(parentContext context.Context) (*http.Response, error) {
@@ -136,6 +140,10 @@ func MakeHTTPRequestWithTimeout(
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, err := client.Do(req)
 	return resp, err
 }

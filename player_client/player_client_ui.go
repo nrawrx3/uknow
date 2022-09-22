@@ -13,12 +13,13 @@ import (
 	"github.com/rksht/uknow"
 )
 
-type uiAction int
+//go:generate stringer -type=UIAction
+type UIAction int
 
 const (
-	uiDrawn uiAction = iota
-	uiRedraw
-	uiClearRedraw
+	uiUpdated UIAction = iota
+	uiRedrawGrid
+	uiClearRedrawGrid
 	uiStop
 )
 
@@ -27,6 +28,7 @@ type ClientUIState string
 const (
 	ClientUIOnlyAllowInspectReplCommands    ClientUIState = "only_allow_inspect_repl_commands"
 	ClientUIAllowPlayerDecisionReplCommands ClientUIState = "allow_player_decision_repl_commands"
+	ClientUIWeHaveAWinner                   ClientUIState = "we_have_a_winner"
 )
 
 const maxLinesInEventLog = 50
@@ -58,7 +60,9 @@ type ClientUI struct {
 	// rw is protected by the uiActionMutex
 	uiActionMutex     sync.Mutex // protects access to every widget object
 	uiActionCond      *sync.Cond // used to signal to UI goro that widget data has been updated and should be drawn
-	action            uiAction
+	action            UIAction
+	windowWidth       int
+	windowHeight      int
 	grid              *ui.Grid
 	pileList          *widgets.List
 	commandPromptCell *widgets.Paragraph
@@ -84,7 +88,8 @@ type ClientUI struct {
 	Logger *log.Logger
 }
 
-func (clientUI *ClientUI) notifyRedrawUI(action uiAction, exec func()) {
+func (clientUI *ClientUI) notifyRedrawUI(action UIAction, exec func(), debugMessage ...string) {
+	clientUI.Logger.Printf("notifyRedrawUI: %s, %v", action, debugMessage)
 	clientUI.uiActionCond.L.Lock()
 	defer clientUI.uiActionCond.L.Unlock()
 	exec()
@@ -117,17 +122,17 @@ func (clientUI *ClientUI) handleCommandInput(playerName string) {
 		defer clientUI.Logger.Printf("Done sending command to clientUI.decisionReplCommandConsumerChan")
 		clientUI.decisionReplCommandConsumerChan <- command
 	} else {
-		clientUI.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
+		// clientUI.Logger.Printf("Before sending general command to clientUI.GeneralReplCommandPushChan")
 		clientUI.GeneralReplCommandPushChan <- command
 
-		clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
+		// clientUI.Logger.Printf("Done sending general command to clientUI.GeneralReplCommandPushChan")
 	}
 	clientUI.commandHistoryPos.Push(clientUI.commandHistory, clientUI.commandStringBeingTyped)
 	clientUI.resetCommandPrompt("")
 }
 
 func (clientUI *ClientUI) appendEventLog(s string) {
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.appendEventLogNoLock(s)
 	})
 }
@@ -159,7 +164,7 @@ func (clientUI *ClientUI) appendCommandPrompt(s string) {
 	clientUI.commandPromptMutex.Lock()
 	defer clientUI.commandPromptMutex.Unlock()
 	clientUI.commandStringBeingTyped += s
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", clientUI.commandStringBeingTyped)
 	})
 }
@@ -172,14 +177,14 @@ func (clientUI *ClientUI) backspaceCommandPrompt() {
 		clientUI.commandStringBeingTyped = clientUI.commandStringBeingTyped[0 : n-1]
 	}
 
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", clientUI.commandStringBeingTyped)
 	})
 }
 
 func (clientUI *ClientUI) resetCommandPrompt(text string) {
 	clientUI.commandStringBeingTyped = text
-	clientUI.notifyRedrawUI(uiRedraw, func() {
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 		clientUI.commandPromptCell.Text = fmt.Sprintf(" %s_", text)
 	})
 }
@@ -287,6 +292,8 @@ func (clientUI *ClientUI) initWidgetObjects() {
 
 	clientUI.discardPileCells = make([]interface{}, 0, numCardsToShowInPile)
 	for i := 0; i < numCardsToShowInPile; i++ {
+		// TODO: Perhaps we can use widgets.List instead of all this
+		// manual management with widgets.Paragraph and ui.Rows??
 		p := widgets.NewParagraph()
 		p.Text = "_"
 		p.Title = ""
@@ -347,7 +354,7 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 	clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
 
 	clientUI.uiActionCond = sync.NewCond(&clientUI.uiActionMutex)
-	clientUI.action = uiRedraw
+	clientUI.action = uiRedrawGrid
 
 	clientUI.initWidgetObjects()
 
@@ -360,6 +367,14 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 	termWidth, termHeight := ui.TerminalDimensions()
 	clientUI.grid.SetRect(0, 0, termWidth, termHeight)
 
+	clientUI.embedWidgetsInGrid()
+
+	clientUI.LogWindowPullChan = logWindowChan
+
+	clientUI.decisionReplCommandConsumerChan = make(chan *ReplCommand)
+}
+
+func (clientUI *ClientUI) embedWidgetsInGrid() {
 	pileCellRows := make([]interface{}, 0, numCardsToShowInPile)
 	sizePerPileCell := 1.0 / numCardsToShowInPile
 	for _, pileCell := range clientUI.discardPileCells {
@@ -375,10 +390,6 @@ func (clientUI *ClientUI) Init(logger *log.Logger,
 		ui.NewRow(0.08, clientUI.selfHandWidget),
 		ui.NewRow(0.1, clientUI.commandPromptCell),
 	)
-
-	clientUI.LogWindowPullChan = logWindowChan
-
-	clientUI.decisionReplCommandConsumerChan = make(chan *ReplCommand)
 }
 
 func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
@@ -387,7 +398,7 @@ func (clientUI *ClientUI) RunGeneralUICommandConsumer(localPlayerName string) {
 		case *UICommandSetServedCards:
 			clientUI.appendEventLog("Received UICommandSetServedCards")
 
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.drawDeckGauge.Percent = cmd.table.DrawDeck.Len()
 				clientUI.initTableElements(cmd.table, localPlayerName)
 			})
@@ -417,7 +428,9 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				clientUI.notifyRedrawUI(uiStop, func() {})
 			case "<Resize>":
 				payload := e.Payload.(ui.Resize)
-				clientUI.notifyRedrawUI(uiRedraw, func() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+					clientUI.windowWidth = payload.Width
+					clientUI.windowHeight = payload.Height
 					clientUI.grid.SetRect(0, 0, payload.Width, payload.Height)
 				})
 			case "<Enter>":
@@ -448,14 +461,19 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 			}
 
 		case askUserForDecisionCommand := <-clientUI.AskUserForDecisionPullChan:
-			clientUI.appendEventLog("It's your turn! Time to make decision")
-
 			clientUI.stateMutex.Lock()
+
+			if clientUI.uiState == ClientUIWeHaveAWinner {
+				clientUI.stateMutex.Unlock()
+				clientUI.appendEventLog("Not processing user decision since we have a winner")
+				continue
+			}
+
 			clientUI.uiState = ClientUIAllowPlayerDecisionReplCommands
 			clientUI.stateMutex.Unlock()
 
 			// Change the UI style a bit to make it obvious it's the local player's turn
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorBlue
 				clientUI.commandPromptCell.TextStyle.Fg = ui.ColorBlue
 				clientUI.drawDeckGauge.BarColor = ui.ColorBlue
@@ -464,7 +482,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 
 			go func() {
 				if askUserForDecisionCommand.LocalPlayerCanChallenge() {
-					clientUI.notifyRedrawUI(uiRedraw, func() {
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 						clientUI.commandPromptCell.Title = fmt.Sprintf("challenge or no_challenge %s?", askUserForDecisionCommand.challengeablePlayer)
 					})
 
@@ -482,13 +500,13 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 						// CONSIDER(@rk): Does it make sense to show a bit more fancy signal in case he makes an illegal decision?
 
 						go func() {
-							clientUI.notifyRedrawUI(uiRedraw, func() {
+							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 								clientUI.drawDeckGauge.BarColor = ui.ColorRed
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorRed
 
 							})
 							<-time.After(2 * time.Second)
-							clientUI.notifyRedrawUI(uiRedraw, func() {
+							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 								clientUI.drawDeckGauge.BarColor = ui.ColorBlue
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorWhite
 							})
@@ -506,17 +524,19 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 				close(askUserForDecisionCommand.receive)
 
 				clientUI.stateMutex.Lock()
-				clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
-				clientUI.stateMutex.Unlock()
-				clientUI.appendEventLog("Done accepting decision commands in REPL")
+				if clientUI.uiState != ClientUIWeHaveAWinner {
+					clientUI.uiState = ClientUIOnlyAllowInspectReplCommands
+					clientUI.appendEventLog("Done accepting decision commands in REPL")
 
-				// Reset the UI style as the local player's turn is over
-				clientUI.notifyRedrawUI(uiRedraw, func() {
-					clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
-					clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
-					clientUI.drawDeckGauge.BarColor = ui.ColorWhite
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
-				})
+					// Reset the UI style as the local player's turn is over
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+						clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
+						clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
+						clientUI.drawDeckGauge.BarColor = ui.ColorWhite
+						clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+					})
+				}
+				clientUI.stateMutex.Unlock()
 			}()
 
 		case logMessage := <-clientUI.LogWindowPullChan:
@@ -529,7 +549,9 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 	for event := range clientUI.GameEventPullChan {
 		switch event := event.(type) {
 		case uknow.CardTransferEvent:
-			clientUI.notifyRedrawUI(uiRedraw, func() {
+			// clientUI.Logger.Printf("received")
+
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.handleCardTransferEvent(event, localPlayerName)
 			})
 
@@ -539,42 +561,78 @@ func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 			}
 
 		case uknow.ChallengerSuccessEvent:
-			// Set challenge result info as command prompt
-			clientUI.notifyRedrawUI(uiRedraw, func() {
-				clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards?", event.WildDraw4PlayerName)
-			})
-
-			// Reset after a bit
-			go func() {
-				<-time.After(5 * time.Second)
-				clientUI.notifyRedrawUI(uiRedraw, func() {
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+			if event.FromLocalClient() { // Set challenge result info as command prompt
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+					clientUI.commandPromptCell.Title = fmt.Sprintf("CHALLENGE SUCCEEDED, %s will draw 4 cards", event.WildDraw4PlayerName)
 				})
-			}()
+			}
 
 		case uknow.ChallengerFailedEvent:
-			// Set challenge result info as command prompt
-			clientUI.notifyRedrawUI(uiRedraw, func() {
-				clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4?"
-			})
-
-			// Reset after a bit
-			go func() {
-				<-time.After(5 * time.Second)
-				clientUI.notifyRedrawUI(uiRedraw, func() {
-					clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
+			if event.FromLocalClient() {
+				// Set challenge result info as command prompt
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+					clientUI.commandPromptCell.Title = "CHALLENGE FAILED, you will draw 6 cards instead of 4"
 				})
-			}()
+
+				// Reset after a bit
+				go clientUI.runResetCommandPromptTitle(3 * time.Second)
+			}
+
+		case uknow.AwaitingPlayOrPassEvent:
+			if event.FromLocalClient() {
+				clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+					clientUI.commandPromptCell.Title = "Please play a card or pass"
+				})
+			}
+
+		case uknow.PlayerPassedTurnEvent:
+			if event.IsFromLocalClient {
+				clientUI.stateMutex.Lock()
+
+				if clientUI.uiState != ClientUIWeHaveAWinner {
+					clientUI.notifyRedrawUI(uiRedrawGrid, func() { clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle })
+				}
+
+				clientUI.stateMutex.Unlock()
+			}
+
+		case uknow.PlayerHasWonEvent:
+			clientUI.stateMutex.Lock()
+			clientUI.uiState = ClientUIWeHaveAWinner
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+				clientUI.commandPromptCell.Title = event.StringMessage(localPlayerName)
+			}, event.Player, "won the game")
+			clientUI.stateMutex.Unlock()
 
 		default:
-			clientUI.Logger.Printf("UKNOWN GAME EVENT: %s", event.GameEventName())
+			clientUI.Logger.Printf("UNKNOWN GAME EVENT: %s", event.GameEventName())
 			clientUI.appendEventLog("<Unknown game event received>")
 		}
 	}
 }
 
+func (clientUI *ClientUI) runResetCommandPromptTitle(timeout time.Duration) {
+	<-time.After(timeout)
+
+	clientUI.stateMutex.Lock()
+	defer clientUI.stateMutex.Unlock()
+
+	clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+		clientUI.setTurnBasedCommandPromptTitle(defaultCommandPromptCellTitle)
+	})
+}
+
+// Does not lock stateMutex
+func (clientUI *ClientUI) setTurnBasedCommandPromptTitle(title string) {
+	if clientUI.uiState != ClientUIWeHaveAWinner {
+		clientUI.commandPromptCell.Title = title
+	}
+}
+
 func (clientUI *ClientUI) handleCardTransferEvent(event uknow.CardTransferEvent, localPlayerName string) {
-	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s, card: %s", event.String(localPlayerName), localPlayerName, event.Card.String()))
+	// TODO(@rk): Don't show the card info if the card transfer is happening
+	// to hand of non local player
+	clientUI.appendEventLogNoLock(fmt.Sprintf("handleCardTransferEvent: %s, localPlayerName: %s", event.String(localPlayerName), localPlayerName))
 
 	switch event.Source {
 	case uknow.CardTransferNodeDeck:
@@ -633,27 +691,24 @@ func (clientUI *ClientUI) RunDrawLoop() {
 	ui.Render(clientUI.grid)
 	for i := 0; ; i++ {
 		clientUI.uiActionCond.L.Lock()
-		for clientUI.action == uiDrawn {
+		for clientUI.action == uiUpdated {
 			clientUI.uiActionCond.Wait()
 		}
 
-		if clientUI.action == uiStop {
-			clientUI.uiActionCond.L.Unlock()
-			return
-		}
+		clientUI.Logger.Printf("Received UI action: %s", clientUI.action)
 
 		switch clientUI.action {
 		case uiStop:
 			clientUI.uiActionCond.L.Unlock()
 			return
-		case uiClearRedraw:
+		case uiClearRedrawGrid:
 			ui.Clear()
 			ui.Render(clientUI.grid)
-			clientUI.action = uiDrawn
-		case uiRedraw:
+			clientUI.action = uiUpdated
+		case uiRedrawGrid:
 			// clientUI.Logger.Printf("Redrawing UI")
 			ui.Render(clientUI.grid)
-			clientUI.action = uiDrawn
+			clientUI.action = uiUpdated
 		default:
 			clientUI.Logger.Fatalf("Invalid action value\n")
 		}

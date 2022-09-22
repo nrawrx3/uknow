@@ -1,15 +1,8 @@
 # Uknow design
 
-Have a server idiot. Replicate THAT. Not the fucking clients. Idiot.
+## Documentation
 
-
-Server has all the game logic. Just asks player to execute a command. 
-
-
-Console - which is the "client" just executes commands based on what the gameserver decides. The gameserver will sometimes ask for player input to the console.
-
-
-
+TODO: Write documentation.
 
 ## Client and server timeouts and keep_alive connections
 
@@ -17,22 +10,13 @@ The reason most http servers in the wild, have a MaxIdleConnsPerHost > 0, is bec
 calling some upstream service while servicing one or more incoming requests in parallel. This means
 if there 5 idle keep-alive conns present in the free list, we can use these to make 5 requests at
 most. If the situation arises where to make more than 5 requests in parallel, new conns, i.e.
-sockets have to be created to the host. Suppose that we have created 2 extra conns, so in total 7
+sockets have to be created for the host. Suppose that we have created 2 extra conns, so in total 7
 conns are in use. After all of them return, only 5 will be kept (maybe in an MRU fashion) in the
 free list and the rest will be closed and returned to the OS.
 
 But in a synchronous app like uknow, you would usually and by that I mean 99% of the time, not make
 multiple parallel requests to the same host. So it doesn't make sense to keep a large pool of idle
 conns for any of the hosts.
-
-Client organism
-
-Maintains state regarding - whether it can respond or not.
-
-Yes some commands can be approved by the client itself. Should we think about this on a command by command basis? What about a challenge?
-
-That puts the admin in an executing-commands state. Every game-command is a state modifier. So it makes sense to route these through the admin.
-
 
 ## State machine
 
@@ -175,3 +159,30 @@ Here `s_enter_wild_card_feedback` denotes a state where the table is expecting a
 
 What about `wild_draw_4`?
 
+
+
+
+## Win condition and other cues in UI
+
+- A player has no cards left. Can only happen after a player has dropped a card.
+
+- Better vis of current color required. Can be communicated to UI using dedicated game event.
+- Better vis of player of current turn. Same, can be communicated using dedicated game event.
+
+
+## Admin server
+
+Multiple admins in one server process. A superuser should create a new admin when he wants to play a new game.
+
+Or is that a bad idea?
+
+We also need a heartbeat procedure to make sure we're not losing any client.
+
+
+## Deploy to cloud server
+
+Deployment should be done via a script.
+
+## BUGS
+
+http: superfluous response.WriteHeader call from github.com/rksht/uknow/admin.(*Admin).handleAddNewPlayer (admin.go:171)

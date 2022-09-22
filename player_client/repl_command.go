@@ -12,10 +12,6 @@ import (
 	"github.com/rksht/uknow"
 )
 
-// `ReplCommandKind` represents a client command. Both UI and Admin can send these commands to the PlayerClient to do an action.
-//go:generate stringer -type=ReplCommandKind
-type ReplCommandKind int
-
 const (
 	ReservedNameDeck          = "<deck>"
 	ReservedNamePile          = "<pile>"
@@ -23,6 +19,11 @@ const (
 	ReservedNameClient        = "<player_client>"
 	ReservedNameCommandPrompt = "<command_prompt>"
 )
+
+// `ReplCommandKind` represents a client command. Both UI and Admin can send these commands to the PlayerClient to do an action.
+//
+//go:generate stringer -type=ReplCommandKind
+type ReplCommandKind int
 
 const (
 	CmdNone          ReplCommandKind = iota
@@ -32,13 +33,15 @@ const (
 	// Non-decision commands
 	CmdQuit
 	CmdConnect
-	CmdTableInfo
+	CmdTableSummary
+	CmdDumpDrawDeck
 	CmdShowHand // Might delete since we want to show hand at all times in the UI in the MVP
 
 	// Player decision commands. Add new decision commands to the _middle_ of the list, or update IsUserDecisionCommand function.
 	CmdDropCard
 	CmdDrawCard
-	CmdDrawCardFromPile
+	CmdPass
+	CmdDrawCardFromPile // TODO(@rk): Delete this? Not needed.
 	CmdSetWildCardColor
 	CmdNoChallenge
 	CmdChallenge
@@ -179,6 +182,10 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.Kind = CmdNoChallenge
 		return s.Scan(), command, nil
 
+	case "pass":
+		command.Kind = CmdPass
+		return s.Scan(), command, nil
+
 	case "connect_default":
 		command.Kind = CmdConnect
 		command.ExtraData = nil
@@ -189,11 +196,25 @@ func parseCommand(s *scanner.Scanner, tok rune, playerName string) (rune, *ReplC
 		command.ExtraData = nil
 		return s.Scan(), command, nil
 
-	case "table_info":
-		command.Kind = CmdTableInfo
+	case "table_summary":
+		command.Kind = CmdTableSummary
 		return s.Scan(), command, nil
 
-	case "showhand":
+	case "dump_drawdeck":
+		command.Kind = CmdDumpDrawDeck
+		countToken := s.Scan()
+		if countToken != scanner.Int {
+			return countToken, command, fmt.Errorf("missing count in command: dump_drawdeck <count>, have: %s", scanner.TokenString(countToken))
+		}
+		var err error
+		command.Count, err = strconv.Atoi(s.TokenText())
+		if err != nil {
+			return countToken, command, fmt.Errorf("%w: Failed to parse count in command:dump_drawdeck <count>", err)
+		}
+
+		return s.Scan(), command, nil
+
+	case "show_hand":
 		command.Kind = CmdShowHand
 		return s.Scan(), command, nil
 

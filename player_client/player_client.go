@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,15 +17,6 @@ import (
 	utils "github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-type ClusterMap map[string]utils.TCPAddress // Map of player name to their public address
 
 type PlayerClientState string
 
@@ -68,7 +60,7 @@ type PlayerClient struct {
 	// player's address to confirm that it can connect. This also creates a
 	// connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
-	neighborListenAddr ClusterMap
+	neighborListenAddr map[string]utils.TCPAddress
 	adminAddr          utils.TCPAddress
 
 	// Exposes the player API to the game admin.
@@ -94,7 +86,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
 		httpClient:         utils.CreateHTTPClient(),
-		neighborListenAddr: make(ClusterMap),
+		neighborListenAddr: make(map[string]utils.TCPAddress),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		adminAddr:          config.DefaultAdminAddr,
@@ -125,7 +117,7 @@ func (c *PlayerClient) RunServer() {
 	c.Logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
 	err := c.httpServer.ListenAndServe()
 	if err != nil {
-		log.Fatalf("PlayerClient.RunServer() failed: %s", err.Error())
+		log.Panicf("PlayerClient.RunServer() failed: %s", err.Error())
 	}
 }
 
@@ -214,11 +206,17 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 			// Just printing to event log window
 			c.logToWindow(c.table.HandOfPlayer[c.table.LocalPlayerName].String())
 
-		case CmdTableInfo:
+		case CmdTableSummary:
 			c.logToWindow("--- table_info:")
 			c.logToWindow(fmt.Sprintf(`client_state: %s`, c.clientState))
 			c.logToWindow(c.table.Summary())
 			c.logToWindow("---")
+
+		case CmdDumpDrawDeck:
+			var sb strings.Builder
+			c.table.PrintDrawDeck(&sb, cmd.Count)
+			c.logToWindow("--- Draw Deck:")
+			c.logToWindow(sb.String())
 
 		default:
 			c.Logger.Printf("RunDefaultCommandHandler: Unhandled command %s", cmd.Kind)
@@ -278,8 +276,7 @@ func (c *PlayerClient) initRouterHandlers() {
 		fmt.Fprintf(w, "pong")
 	})
 
-	// NOTE(@rk): Event the message handlers and paths convention. Starts with "/event"
-
+	// CONVENTION(@rk): See EventMessage for the convention we're using.
 	c.router.Path("/event/served_cards").Methods("POST").HandlerFunc(c.handleServedCardsEvent)
 	c.router.Path("/event/chosen_player").Methods("POST").HandlerFunc(c.handleChosenPlayerEvent)
 	c.router.Path("/event/player_decisions_sync").Methods("POST").HandlerFunc(c.handlePlayerDecisionsSyncEvent)
@@ -400,7 +397,7 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	}
 
 	if c.table.LocalPlayerName == chosenPlayerEvent.PlayerName {
-		c.logToWindow("It's our turn now!")
+		c.logToWindow("=====Turn end=====")
 	} else {
 		c.logToWindow("It's player %s's turn", chosenPlayerEvent.PlayerName)
 		c.clientState = WaitingForDecisionSync
@@ -428,7 +425,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		sender:             "PlayerClient",   // TODO(@rk): Unused and arbitrary. Just delete.
 	}
 
-	if c.table.TurnStateTag == uknow.AwaitingWildDraw4ChallengeDecision {
+	if c.table.TableState == uknow.AwaitingWildDraw4ChallengeDecision {
 		askCommand.SetChallengeablePlayer(c.table.PlayerOfLastTurn)
 	}
 
@@ -444,7 +441,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 		if err != nil {
 			var errEvalDecision *uknow.EvalDecisionError
 			if errors.As(err, &errEvalDecision) {
-				msg := fmt.Sprintf("invalid decision, eligible decisions are: %s", uknow.EligibleCommandsAtState(c.table.TurnStateTag))
+				msg := fmt.Sprintf("invalid decision, eligible decisions are: %s", uknow.EligibleCommandsAtState(c.table.TableState))
 				c.Logger.Printf(msg)
 				c.logToWindow(msg)
 			} else {
@@ -536,6 +533,8 @@ func (c *PlayerClient) handlePlayerDecisionsSyncEvent(w http.ResponseWriter, r *
 	c.Logger.Printf("Evaluating player %s's %d decisions: %+v", decisionsEvent.DecidingPlayer, len(decisionsEvent.Decisions), decisionsEvent)
 	c.table.EvalPlayerDecisions(decisionsEvent.DecidingPlayer, decisionsEvent.Decisions, c.GameEventPushChan)
 
+	c.Logger.Printf("Done evaluating player %s's %d decisions", decisionsEvent.DecidingPlayer, len(decisionsEvent.Decisions))
+
 	c.clientState = WaitingForAdminToChoosePlayer
 }
 
@@ -591,6 +590,13 @@ func (c *PlayerClient) evalReplCommandOnTable(replCommand *ReplCommand) (uknow.P
 		}
 		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
 
+	case CmdPass:
+		decision := uknow.PlayerDecision{
+			Kind: uknow.PlayerDecisionPass,
+		}
+
+		return c.table.EvalPlayerDecision(c.table.LocalPlayerName, decision, c.GameEventPushChan)
+
 	default:
 		c.Logger.Printf("Unknown repl command kind: %s", replCommand.Kind.String())
 		return uknow.PlayerDecision{}, ErrorUnimplementedReplCommand
@@ -623,6 +629,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			_, exists := c.neighborListenAddr[playerName]
 			if exists || playerName == c.table.LocalPlayerName {
 				return nil
+
 			}
 
 			listenAddr := playerListenAddrs[i]

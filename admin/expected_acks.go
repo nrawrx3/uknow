@@ -32,18 +32,20 @@ type expectedAcksList struct {
 	mu               sync.Mutex
 	pendingAcks      []*pendingAck
 	chNewAckReceived chan expectedAck
+	logger           *log.Logger
 }
 
-func newExpectedAcksState() *expectedAcksList {
+func newExpectedAcksState(logger *log.Logger) *expectedAcksList {
 	return &expectedAcksList{
 		pendingAcks:      make([]*pendingAck, 0, 16),
 		chNewAckReceived: make(chan expectedAck),
+		logger:           logger,
 	}
 }
 
 func (es *expectedAcksList) addPending(ack expectedAck, timeout time.Duration, onAck, onTimeout func()) {
 	es.mu.Lock()
-	log.Printf("Adding new expecting ack to list %+v", ack)
+	es.logger.Printf("Adding new expecting ack to list %+v", ack)
 
 	pendingAck := &pendingAck{
 		expectedAck:     ack,
@@ -89,7 +91,7 @@ func (es *expectedAcksList) waitForAcks() {
 				continue
 			}
 
-			log.Printf("Acking the ack: %s", pendingAck.ackId)
+			es.logger.Printf("Acking the ack: %s", pendingAck.ackId)
 
 			pendingAck.ackReceivedChan <- struct{}{}
 			es.pendingAcks = append(es.pendingAcks[0:i], es.pendingAcks[i+1:len(es.pendingAcks)]...)

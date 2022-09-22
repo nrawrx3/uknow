@@ -10,14 +10,15 @@ func _() {
 	var x [1]struct{}
 	_ = x[PlayerDecisionPullFromDeck-1]
 	_ = x[PlayerDecisionPlayHandCard-2]
-	_ = x[PlayerDecisionWildCardChooseColor-3]
-	_ = x[PlayerDecisionDoChallenge-4]
-	_ = x[PlayerDecisionDontChallenge-5]
+	_ = x[PlayerDecisionPass-3]
+	_ = x[PlayerDecisionWildCardChooseColor-4]
+	_ = x[PlayerDecisionDoChallenge-5]
+	_ = x[PlayerDecisionDontChallenge-6]
 }
 
-const _PlayerDecisionKind_name = "PlayerDecisionPullFromDeckPlayerDecisionPlayHandCardPlayerDecisionWildCardChooseColorPlayerDecisionDoChallengePlayerDecisionDontChallenge"
+const _PlayerDecisionKind_name = "PlayerDecisionPullFromDeckPlayerDecisionPlayHandCardPlayerDecisionPassPlayerDecisionWildCardChooseColorPlayerDecisionDoChallengePlayerDecisionDontChallenge"
 
-var _PlayerDecisionKind_index = [...]uint8{0, 26, 52, 85, 110, 137}
+var _PlayerDecisionKind_index = [...]uint8{0, 26, 52, 70, 103, 128, 155}
 
 func (i PlayerDecisionKind) String() string {
 	i -= 1
