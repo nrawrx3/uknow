@@ -176,6 +176,8 @@ Multiple admins in one server process. A superuser should create a new admin whe
 
 Or is that a bad idea?
 
+Create admins on demand. Any client can create a new game session with a command. Multi-admin then spawns a new admin to serve the game.
+
 We also need a heartbeat procedure to make sure we're not losing any client.
 
 
