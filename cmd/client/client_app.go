@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-	"strings"
+	"os"
 
 	ui "github.com/gizak/termui/v3"
-	"github.com/joho/godotenv"
-	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
 	cmdcommon "github.com/rksht/uknow/cmd"
 	"github.com/rksht/uknow/internal/utils"
@@ -16,44 +17,58 @@ import (
 )
 
 var configFile string
-var envConfig client.EnvConfig
-var configPrefix string
+
+func LoadConfig(configFile string) (client.ClientUserConfig, *uknow.AESCipher) {
+	f, err := os.Open(configFile)
+	if err != nil {
+		log.Fatalf("failed to open config file %s: %v", configFile, err)
+	}
+	defer f.Close()
+
+	configBytes, err := io.ReadAll(f)
+	if err != nil {
+		log.Fatalf("failed to read config file %s: %v", configFile, err)
+	}
+
+	var clientConfig client.ClientUserConfig
+	err = json.NewDecoder(bytes.NewReader(configBytes)).Decode(&clientConfig)
+	if err != nil {
+		log.Fatalf("failed to parse admin config: %v", err)
+	}
+
+	if clientConfig.Type != "client" {
+		log.Fatalf("expected \"type\" field in config to have value \"admin\"")
+	}
+
+	var aesCipher *uknow.AESCipher
+	if clientConfig.EncryptMessages {
+		aesCipher, err = uknow.NewAESCipher(clientConfig.AESKeyString)
+		if err != nil {
+			log.Fatalf("failed to create aes cipger: %v", err)
+		}
+	}
+
+	return clientConfig, aesCipher
+}
 
 func RunApp() {
-	flag.StringVar(&configFile, "conf", ".env", "config file")
-	flag.StringVar(&configPrefix, "conf-prefix", "", "config key prefix")
+	// flag.StringVar(&configFile, "conf", ".env", "config file")
+	// flag.StringVar(&configPrefix, "conf-prefix", "", "config key prefix")
+
+	flag.StringVar(&configFile, "conf", "", "config file")
 	flag.Parse()
 
-	if configPrefix == "" {
-		log.Print("Value -conf-prefix not specified")
+	clientConfig, aesCipher := LoadConfig(configFile)
+
+	if !client.IsUserNameAllowed(clientConfig.PlayerName) {
+		log.Fatalf("Only names with alphabet and underscore characters allowed, name given: %s", clientConfig.PlayerName)
 	}
 
-	log.Printf("Loading configs from file %s", configFile)
+	tableLogger := uknow.CreateFileLogger(false, fmt.Sprintf("table_%s", clientConfig.PlayerName))
+	table := uknow.NewTable(clientConfig.PlayerName, tableLogger)
 
-	if err := godotenv.Load(configFile); err != nil {
-		log.Fatal(err.Error())
-	}
-
-	err := envconfig.Process(configPrefix, &envConfig)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	envConfig.PlayerName = strings.TrimSpace(envConfig.PlayerName)
-
-	if !client.IsUserNameAllowed(envConfig.PlayerName) {
-		log.Fatalf("Only names with alphabet and underscore characters allowed, name given: %s", envConfig.PlayerName)
-	}
-
-	// Create the channel used by the client to request to the UI to let the player input a decision
-	// command
-
+	// Channels used for comms events, etc.
 	commChannels := client.MakeCommChannels()
-
-	tableLogger := uknow.CreateFileLogger(false, fmt.Sprintf("table_%s", envConfig.PlayerName))
-
-	table := uknow.NewTable(envConfig.PlayerName, tableLogger)
-
 	clientChannels := client.ClientChannels{
 		GeneralUICommandPushChan:       commChannels.GeneralUICommandChan,
 		AskUserForDecisionPushChan:     commChannels.AskUIForUserTurnChan,
@@ -65,15 +80,16 @@ func RunApp() {
 	playerClientConfig := &client.ConfigNewPlayerClient{
 		ClientChannels: clientChannels,
 		Table:          table,
-		ListenAddr: utils.TCPAddress{
-			Host:     envConfig.CommandListenHost,
-			Port:     envConfig.CommandListenPort,
+		ListenAddr: utils.HostPortProtocol{
+			IP:       clientConfig.CommandListenIP,
+			Port:     clientConfig.CommandListenPort,
 			Protocol: "http",
 		},
+		AESCipher: aesCipher,
 	}
 
-	if envConfig.AdminHost != "" && envConfig.AdminPort != 0 {
-		playerClientConfig.DefaultAdminAddr = utils.TCPAddress{Host: envConfig.AdminHost, Port: envConfig.AdminPort}
+	if clientConfig.AdminHostIP != "" && clientConfig.AdminPort != 0 {
+		playerClientConfig.DefaultAdminAddr = utils.HostPortProtocol{IP: clientConfig.AdminHostIP, Port: clientConfig.AdminPort}
 	}
 
 	// FILTHY(@rk):TODO(@rk): Delete this when done with proper implementation in ui
@@ -96,7 +112,7 @@ func RunApp() {
 	go c.RunServer()
 	go c.RunGeneralCommandHandler()
 
-	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", envConfig.PlayerName))
+	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", clientConfig.PlayerName))
 
 	var clientUI client.ClientUI
 	clientUI.Init(uiLogger,
@@ -107,9 +123,9 @@ func RunApp() {
 		commChannels.LogWindowChan)
 	defer ui.Close()
 
-	go clientUI.RunPollInputEvents(envConfig.PlayerName)
-	go clientUI.RunGeneralUICommandConsumer(envConfig.PlayerName)
-	go clientUI.RunGameEventProcessor(envConfig.PlayerName)
+	go clientUI.RunPollInputEvents(clientConfig.PlayerName)
+	go clientUI.RunGeneralUICommandConsumer(clientConfig.PlayerName)
+	go clientUI.RunGameEventProcessor(clientConfig.PlayerName)
 	clientUI.RunDrawLoop()
 }
 

@@ -13,8 +13,8 @@ import (
 )
 
 type AddNewPlayersMessage struct {
-	PlayerNames       []string           `json:"player_names"`
-	ClientListenAddrs []utils.TCPAddress `json:"client_listen_addrs"`
+	PlayerNames       []string                 `json:"player_names"`
+	ClientListenAddrs []utils.HostPortProtocol `json:"client_listen_addrs"`
 }
 
 func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clientPort int, protocol string) *AddNewPlayersMessage {
@@ -23,16 +23,16 @@ func (msg *AddNewPlayersMessage) Add(playerName string, clientHost string, clien
 	}
 
 	if msg.ClientListenAddrs == nil {
-		msg.ClientListenAddrs = make([]utils.TCPAddress, 0, 4)
+		msg.ClientListenAddrs = make([]utils.HostPortProtocol, 0, 4)
 	}
 
 	msg.PlayerNames = append(msg.PlayerNames, playerName)
-	msg.ClientListenAddrs = append(msg.ClientListenAddrs, utils.TCPAddress{Host: clientHost, Port: clientPort, Protocol: protocol})
+	msg.ClientListenAddrs = append(msg.ClientListenAddrs, utils.HostPortProtocol{IP: clientHost, Port: clientPort, Protocol: protocol})
 	return msg
 }
 
 type GetPlayersMessage struct {
-	ListenAddrOfPlayer map[string]utils.TCPAddress `json:"listen_addr_of_player"`
+	ListenAddrOfPlayer map[string]utils.HostPortProtocol `json:"listen_addr_of_player"`
 }
 
 type AckNewPlayerAddedMessage struct {
@@ -123,6 +123,8 @@ func MustJSONReader(v interface{}) io.Reader {
 	return &b
 }
 
+// Decrypt given bytes reader if aesCipher is non-nil, and decode resulting JSON
+// bytes into given structPointer
 func DecryptAndDecodeJSON(structPointer interface{}, input io.Reader, aesCipher *uknow.AESCipher) error {
 	if aesCipher == nil {
 		return json.NewDecoder(input).Decode(structPointer)
@@ -131,6 +133,7 @@ func DecryptAndDecodeJSON(structPointer interface{}, input io.Reader, aesCipher 
 	return aesCipher.MustDecryptJSON(input).Decode(structPointer)
 }
 
+// Encode given struct as JSON and encrypt if given aesCipher is non-nil
 func EncodeJSONAndEncrypt(inputStructPointer interface{}, output io.Writer, aesCipher *uknow.AESCipher) error {
 	if aesCipher == nil {
 		if respWriter, ok := output.(http.ResponseWriter); ok {

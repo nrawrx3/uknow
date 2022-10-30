@@ -75,13 +75,7 @@ var ErrUnexpectedJSONType = errors.New("unexpected JSON type")
 // The table should be the returned value of NewTable(...) or
 // NewAdminTable(...), and not modified before passing it to this function.
 // TODO(@rk): Add preset discard pile.
-func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger) (*uknow.Table, error) {
-	var j map[string]interface{}
-	err := json.Unmarshal(bytes, &j)
-	if err != nil {
-		return nil, err
-	}
-
+func LoadConfig(j map[string]interface{}, initializedTable *uknow.Table, logger *log.Logger) (*uknow.Table, error) {
 	handDescOf := make(map[string]*handDesc)
 	discardedPileSize := 0
 	playerOfNextTurn := ""
@@ -107,6 +101,7 @@ func LoadConfig(bytes []byte, initializedTable *uknow.Table, logger *log.Logger)
 		} else if key == "player_of_next_turn" {
 			playerOfNextTurn = strings.TrimSpace(value.(string))
 		} else if key == "preset_discard_pile_top" {
+			var err error
 			presetDiscardPileTop, err = parsePresetDiscardPileTop(value)
 			if err != nil {
 				return nil, err
@@ -136,7 +131,14 @@ func LoadConfigFromFile(filepath string, initializedTable *uknow.Table, logger *
 	if err != nil {
 		return nil, fmt.Errorf("could not load hand config from file: %w", err)
 	}
-	return LoadConfig(bytes, initializedTable, logger)
+
+	var j map[string]interface{}
+	err = json.Unmarshal(bytes, &j)
+	if err != nil {
+		return nil, err
+	}
+
+	return LoadConfig(j, initializedTable, logger)
 }
 
 var ErrCouldNotRemoveCard = errors.New("could not remove card")

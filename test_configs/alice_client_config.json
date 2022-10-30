@@ -1,0 +1,8 @@
+{
+        "type": "client",
+        "command_listen_ip": "localhost",
+        "command_listen_port": 10530,
+        "admin_host_ip": "localhost",
+        "admin_port": 10540,
+        "player_name": "alice"
+}

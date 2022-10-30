@@ -3,22 +3,21 @@ package admin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
-	"github.com/kelseyhightower/envconfig"
 	"github.com/rksht/uknow"
-	cmdcommon "github.com/rksht/uknow/cmd"
 	"github.com/rksht/uknow/hand_reader"
 	"github.com/rksht/uknow/internal/messages"
 	"github.com/rksht/uknow/internal/utils"
@@ -26,7 +25,7 @@ import (
 )
 
 var (
-	envConfig EnvConfig
+	// adminUserConfig AdminUserConfig
 
 	errorWaitingForAcks    = errors.New("waiting for acks")
 	errorInvalidAdminState = errors.New("invalid admin state")
@@ -47,9 +46,9 @@ const (
 	HaveWinner                        AdminState = "have_winner"
 )
 
-func playerWithAddress(addr utils.TCPAddress, listenAddrOfPlayer map[string]utils.TCPAddress) (string, error) {
+func playerWithAddress(addr utils.HostPortProtocol, listenAddrOfPlayer map[string]utils.HostPortProtocol) (string, error) {
 	for playerName, valAddr := range listenAddrOfPlayer {
-		if valAddr.Host == addr.Host {
+		if valAddr.IP == addr.IP {
 			return playerName, nil
 		}
 	}
@@ -71,12 +70,13 @@ type Admin struct {
 	stateMutex sync.Mutex
 	state      AdminState
 
-	aesCipher *uknow.AESCipher
+	userConfig *AdminUserConfig
+	aesCipher  *uknow.AESCipher
 
 	// Address of player registered on connect command
-	listenAddrOfPlayer      map[string]utils.TCPAddress
+	listenAddrOfPlayer      map[string]utils.HostPortProtocol
 	shuffler                string
-	setReadyPlayer          string
+	readyPlayerName         string
 	httpClient              *http.Client
 	httpServer              *http.Server
 	logger                  *log.Logger
@@ -88,25 +88,26 @@ type Admin struct {
 }
 
 type ConfigNewAdmin struct {
-	ListenAddr     utils.TCPAddress
-	Table          *uknow.Table
-	SetReadyPlayer string
-	aesCipher      *uknow.AESCipher
+	ListenAddr      utils.HostPortProtocol
+	Table           *uknow.Table
+	ReadyPlayerName string
+	aesCipher       *uknow.AESCipher
 }
 
 const logFilePrefix = "admin"
 
-func NewAdmin(config *ConfigNewAdmin) *Admin {
+func NewAdmin(config *ConfigNewAdmin, userConfig *AdminUserConfig) *Admin {
 	logger := uknow.CreateFileLogger(false, logFilePrefix)
 	admin := &Admin{
 		table:              config.Table,
-		listenAddrOfPlayer: make(map[string]utils.TCPAddress),
+		userConfig:         userConfig,
+		listenAddrOfPlayer: make(map[string]utils.HostPortProtocol),
 		shuffler:           "",
 		aesCipher:          config.aesCipher,
 		state:              AddingPlayers,
 		expectedAcksList:   newExpectedAcksState(logger),
 		logger:             logger,
-		setReadyPlayer:     config.SetReadyPlayer,
+		readyPlayerName:    config.ReadyPlayerName,
 	}
 
 	admin.httpClient = utils.CreateHTTPClient()
@@ -139,11 +140,11 @@ func (admin *Admin) Restart() {
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
 
-	admin.table = createStartingTable(&envConfig)
+	admin.table = createStartingTable(admin.userConfig)
 
 	admin.logger = uknow.CreateFileLogger(false, logFilePrefix)
 
-	admin.listenAddrOfPlayer = make(map[string]utils.TCPAddress)
+	admin.listenAddrOfPlayer = make(map[string]utils.HostPortProtocol)
 	admin.shuffler = ""
 	admin.state = AddingPlayers
 	admin.expectedAcksList = newExpectedAcksState(admin.logger)
@@ -201,7 +202,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	newPlayerListenAddr := msg.ClientListenAddrs[0]
 
 	// Tell existing players about the new player
-	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerListenAddr.Host, newPlayerListenAddr.Port)
+	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerListenAddr.IP, newPlayerListenAddr.Port)
 
 	// Add the player to the local table. **But don't if it's already added
 	// by hand-reader - in which case check that we have this player in the
@@ -233,7 +234,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	admin.shuffler = newPlayerName
 
 	// Tell existing players about new player asynchronously
-	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerListenAddr.Host, newPlayerListenAddr.Port)
+	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerListenAddr.IP, newPlayerListenAddr.Port)
 
 	// Tell the new player about existing players. This is by sending AddNewPlayersMessage as a response containing the existing players info.
 	var respAddNewPlayersMessage messages.AddNewPlayersMessage
@@ -243,14 +244,14 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		admin.logger.Printf("Telling existing player '%s' about '%s'", playerName, newPlayerName)
-		addr, err := utils.ResolveTCPAddress(playerListenAddr.String())
+		addr, err := utils.ResolveTCPAddress(playerListenAddr.HTTPAddressString())
 		if err != nil {
 			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
 			w.WriteHeader(http.StatusInternalServerError)
 			messages.WriteErrorPayload(w, err)
 			continue
 		}
-		respAddNewPlayersMessage.Add(playerName, addr.Host, addr.Port, "http")
+		respAddNewPlayersMessage.Add(playerName, addr.IP, addr.Port, "http")
 
 		// Also add an expecting-ack that admin should receive from the new player for connecting to each of the existing players.
 
@@ -281,8 +282,8 @@ func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerNa
 		playerName := playerName
 
 		g.Go(func() error {
-			url := playerListenAddr.HTTPAddress() + "/players"
-			admin.logger.Printf("telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.String(), newPlayerName, url)
+			url := playerListenAddr.HTTPAddressString() + "/players"
+			admin.logger.Printf("telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.HTTPAddressString(), newPlayerName, url)
 
 			var b bytes.Buffer
 			messages.EncodeJSONAndEncrypt(&addPlayerMsg, &b, admin.aesCipher)
@@ -379,7 +380,7 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if admin.setReadyPlayer != "" && (senderPlayerName != admin.setReadyPlayer) {
+	if admin.readyPlayerName != "" && (senderPlayerName != admin.readyPlayerName) {
 		admin.logger.Printf("player %s not set as setReadyPlayer", senderPlayerName)
 		w.WriteHeader(http.StatusForbidden)
 		return
@@ -518,12 +519,12 @@ func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent
 }
 
 func (admin *Admin) runNewTurn() {
-	if envConfig.DebugNewTurnViaPrompt {
+	if admin.userConfig.DebugSignalNewTurnViaPrompt {
 		log.Printf("Waiting for `newturn` command before starting turn")
 		return
 	}
 
-	<-time.After(time.Duration(envConfig.PauseMsecsBeforeNewTurn) * time.Millisecond)
+	<-time.After(time.Duration(admin.userConfig.PauseMsecsBeforeNewTurn) * time.Millisecond)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
@@ -575,11 +576,11 @@ func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath s
 func (admin *Admin) sendMessageToPlayer(
 	ctx context.Context,
 	playerName string,
-	playerAddr utils.TCPAddress,
+	playerAddr utils.HostPortProtocol,
 	eventRestPath string,
 	requestBodyReader io.Reader) error {
 
-	playerURL := fmt.Sprintf("%s/event/%s", playerAddr.String(), eventRestPath)
+	playerURL := fmt.Sprintf("%s/event/%s", playerAddr.HTTPAddressString(), eventRestPath)
 
 	admin.logger.Printf("Sending to playerURL: %s", playerURL)
 
@@ -778,15 +779,15 @@ func (admin *Admin) RunREPL() {
 }
 
 // If there's a starting hand-config specified for debugging, we create a table accordingly
-func createStartingTable(c *EnvConfig) *uknow.Table {
+func createStartingTable(c *AdminUserConfig) *uknow.Table {
 	tableLogger := uknow.CreateFileLogger(false, "table_admin")
 	table := uknow.NewAdminTable(tableLogger)
 	var err error
 
 	if c.DebugStartingHandConfigFile != "" {
 		table, err = hand_reader.LoadConfigFromFile(c.DebugStartingHandConfigFile, table, tableLogger)
-	} else if c.DebugStartingHandConfigJSON != "" {
-		table, err = hand_reader.LoadConfig([]byte(c.DebugStartingHandConfigJSON), table, log.Default())
+	} else if c.DebugStartingHandConfig != nil {
+		table, err = hand_reader.LoadConfig(c.DebugStartingHandConfig, table, log.Default())
 	} else {
 		return table
 	}
@@ -799,51 +800,61 @@ func createStartingTable(c *EnvConfig) *uknow.Table {
 	return table
 }
 
-func RunApp() {
-	var adminConfigFile string
-	flag.StringVar(&adminConfigFile, "conf", ".env", "Dotenv config file for admin server")
+func LoadConfig(configFile string) (AdminUserConfig, *uknow.AESCipher) {
+	f, err := os.Open(configFile)
+	if err != nil {
+		log.Fatalf("failed to open config file %s: %v", configFile, err)
+	}
+	defer f.Close()
 
-	flag.Parse()
-
-	if adminConfigFile == ".env" {
-		log.Print("No config file given, reading from .env")
+	configBytes, err := io.ReadAll(f)
+	if err != nil {
+		log.Fatalf("failed to read config file %s: %v", configFile, err)
 	}
 
-	err := godotenv.Load(adminConfigFile)
+	var adminConfig AdminUserConfig
+	err = json.NewDecoder(bytes.NewReader(configBytes)).Decode(&adminConfig)
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Fatalf("failed to parse admin config: %v", err)
 	}
 
-	err = envconfig.Process("ADMIN", &envConfig)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
-	commonConfig, err := cmdcommon.LoadCommonConfig()
-	if err != nil {
-		log.Fatalf("failed to load common config: %v", err)
+	if adminConfig.Type != "admin" {
+		log.Fatalf("expected \"type\" field in config to have value \"admin\"")
 	}
 
 	var aesCipher *uknow.AESCipher
-
-	if commonConfig.EncryptMessages {
-		aesCipher, err = uknow.NewAESCipher(commonConfig.AESKey)
+	if adminConfig.EncryptMessages {
+		aesCipher, err = uknow.NewAESCipher(adminConfig.AESKeyString)
 		if err != nil {
-			log.Fatalf("failed to create aes cipher: %v", err)
+			log.Fatalf("failed to create aes cipger: %v", err)
 		}
 	}
 
-	config := &ConfigNewAdmin{}
-	config.ListenAddr = utils.TCPAddress{Host: envConfig.ListenAddr, Port: envConfig.ListenPort}
+	return adminConfig, aesCipher
+}
 
-	config.Table = createStartingTable(&envConfig)
-	config.SetReadyPlayer = envConfig.SetReadyPlayer
+func RunApp() {
+	var adminConfigFile string
+	flag.StringVar(&adminConfigFile, "conf", "", "Dotenv config file for admin server")
+	flag.Parse()
+
+	if adminConfigFile == "" {
+		log.Fatal("missing flag: -conf config_file")
+	}
+
+	adminUserConfig, aesCipher := LoadConfig(adminConfigFile)
+
+	config := &ConfigNewAdmin{}
+	config.ListenAddr = utils.HostPortProtocol{IP: adminUserConfig.ListenIP, Port: adminUserConfig.ListenPort}
+
+	config.Table = createStartingTable(&adminUserConfig)
+	config.ReadyPlayerName = adminUserConfig.ReadyPlayerName
 	config.aesCipher = aesCipher
 
-	admin := NewAdmin(config)
+	admin := NewAdmin(config, &adminUserConfig)
 
 	// Admin REPL
-	if envConfig.RunREPL {
+	if adminUserConfig.RunREPL {
 		go admin.RunServer()
 		admin.RunREPL()
 	} else {

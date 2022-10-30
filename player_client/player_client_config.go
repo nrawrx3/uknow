@@ -4,15 +4,18 @@ import (
 	"github.com/rksht/uknow"
 )
 
-type EnvConfig struct {
-	CommandListenHost string `split_words:"true" default:"localhost"`
-	CommandListenPort int    `split_words:"true" required:"true" split_words:"true"`
+type ClientUserConfig struct {
+	Type string `json:"type"` // Should always be "client"
+
+	CommandListenIP   string `json:"command_listen_ip"`
+	CommandListenPort int    `json:"command_listen_port"`
 
 	// The default admin address to connect to using `connect_default` command.
-	AdminHost  string   `split_words:"true" default:"localhost"`
-	AdminPort  int      `split_words:"true" required:"true"`
-	PlayerName string   `split_words:"true" required:"true"`
-	DebugFlags []string `split_words:"true"`
+	AdminHostIP     string `json:"admin_host_ip"`
+	AdminPort       int    `json:"admin_port"`
+	PlayerName      string `json:"player_name"`
+	AESKeyString    string `json:"aes_key"`
+	EncryptMessages bool   `json:"encrypt_messages"`
 }
 
 // Channels used for communication between the client components - PlayerClientUI and PlayerClient

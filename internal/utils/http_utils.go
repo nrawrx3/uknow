@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-type TCPAddress struct {
-	Host     string `json:"host"`
+type HostPortProtocol struct {
+	IP       string `json:"ip"`
 	Port     int    `json:"port"`
 	Protocol string `json:"protocol"`
 }
@@ -24,40 +24,43 @@ func trimProtocolPrefix(addr string) string {
 	return addr
 }
 
-func (t *TCPAddress) SetHostPort(host string, port int) {
-	host = trimProtocolPrefix(host)
-	t.Host = host
+func (t *HostPortProtocol) SetHostPort(ip string, port int) {
+	ip = trimProtocolPrefix(ip)
+	t.IP = ip
 	t.Port = port
 }
 
-func (t *TCPAddress) HTTPAddress() string {
+// Ignore the Protocol, return the http address. If port is 0, doesn't prepend it.
+func (t *HostPortProtocol) HTTPAddressString() string {
 	if t.Port != 0 {
-		return fmt.Sprintf("http://%s:%d", t.Host, t.Port)
+		return fmt.Sprintf("http://%s:%d", t.IP, t.Port)
 	} else {
-		return fmt.Sprintf("http://%s", t.Host)
+		return fmt.Sprintf("http://%s", t.IP)
 	}
 }
 
-func (t *TCPAddress) String() string {
+func (t *HostPortProtocol) ProtocolAddressString() string {
 	protocol := "http"
 	if t.Protocol != "" {
 		protocol = t.Protocol
 	}
-	return fmt.Sprintf("%s://%s:%d", protocol, t.Host, t.Port)
+	return fmt.Sprintf("%s://%s:%d", protocol, t.IP, t.Port)
 }
 
-func (t *TCPAddress) BindString() string {
-	return fmt.Sprintf("%s:%d", t.Host, t.Port)
+// This is the address string to use as arguments to net.Dial or net.Listen
+// functions.
+func (t *HostPortProtocol) BindString() string {
+	return fmt.Sprintf("%s:%d", t.IP, t.Port)
 }
 
-func ConcatHostPort(protocol string, host string, port int) string {
-	if protocol == "" {
-		return fmt.Sprintf("%s:%d", host, port)
-	}
-	return fmt.Sprintf("%s://%s:%d", protocol, host, port)
-}
+// func ConcatHostPort(protocol string, host string, port int) string {
+// 	if protocol == "" {
+// 		return fmt.Sprintf("%s:%d", host, port)
+// 	}
+// 	return fmt.Sprintf("%s://%s:%d", protocol, host, port)
+// }
 
-func ResolveTCPAddress(addr string) (TCPAddress, error) {
+func ResolveTCPAddress(addr string) (HostPortProtocol, error) {
 	var protocol string
 
 	if strings.HasPrefix(addr, "http://") {
@@ -74,10 +77,10 @@ func ResolveTCPAddress(addr string) (TCPAddress, error) {
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return TCPAddress{}, err
+		return HostPortProtocol{}, err
 	}
-	return TCPAddress{
-		Host:     tcpAddr.IP.String(),
+	return HostPortProtocol{
+		IP:       tcpAddr.IP.String(),
 		Port:     tcpAddr.Port,
 		Protocol: protocol,
 	}, nil
