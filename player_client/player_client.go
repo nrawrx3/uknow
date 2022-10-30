@@ -60,8 +60,8 @@ type PlayerClient struct {
 	// player's address to confirm that it can connect. This also creates a
 	// connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
-	neighborListenAddr map[string]utils.TCPAddress
-	adminAddr          utils.TCPAddress
+	neighborListenAddr map[string]utils.HostPortProtocol
+	adminAddr          utils.HostPortProtocol
 
 	// Exposes the player API to the game admin.
 	router *mux.Router
@@ -76,8 +76,8 @@ type ConfigNewPlayerClient struct {
 	TestErrorChan chan<- error
 	Table         *uknow.Table
 	// HttpListenAddr             string
-	ListenAddr       utils.TCPAddress
-	DefaultAdminAddr utils.TCPAddress
+	ListenAddr       utils.HostPortProtocol
+	DefaultAdminAddr utils.HostPortProtocol
 	AESCipher        *uknow.AESCipher
 }
 
@@ -86,7 +86,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
 		httpClient:         utils.CreateHTTPClient(),
-		neighborListenAddr: make(map[string]utils.TCPAddress),
+		neighborListenAddr: make(map[string]utils.HostPortProtocol),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		adminAddr:          config.DefaultAdminAddr,
@@ -102,7 +102,6 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		Handler: c.router,
 	}
 
-	c.Logger.Printf("Addr bind string = %s", config.ListenAddr.BindString())
 	c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
 
 	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
@@ -136,7 +135,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 			c.Logger.Printf("Received a connect command from UI...")
 
 			// Building the message struct first since it doesn't depend on mutable state
-			var adminAddr utils.TCPAddress
+			var adminAddr utils.HostPortProtocol
 			var err error
 
 			if adminAddrString, ok := cmd.ExtraData.(string); ok {
@@ -156,7 +155,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 				c.Logger.Fatal(err)
 			}
 
-			msg.Add(c.table.LocalPlayerName, listenAddr.Host, listenAddr.Port, "http")
+			msg.Add(c.table.LocalPlayerName, listenAddr.IP, listenAddr.Port, "http")
 
 			// Lock and check if we have the correct state. Connect to admin if yes.
 			c.stateMutex.Lock()
@@ -165,14 +164,14 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 				c.stateMutex.Unlock()
 				continue
 			}
-			c.Logger.Printf("Will sending listenAddr %+v to admin", listenAddr)
+			c.Logger.Printf("Will be sending listenAddr %+v to admin", listenAddr)
 			c.connectToAdmin(ctx, msg, adminAddr)
 			c.stateMutex.Unlock()
 
 		case CmdDeclareReady:
 			c.Logger.Printf("Received a declare ready command from UI...")
 
-			url := fmt.Sprintf("%s/set_ready", c.adminAddr.String())
+			url := fmt.Sprintf("%s/set_ready", c.adminAddr.HTTPAddressString())
 
 			setReadyMessage := messages.SetReadyMessage{
 				ShufflerName:          c.table.LocalPlayerName,
@@ -227,7 +226,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 }
 
 // DOES NOT LOCK stateMutex. Connects to admin and updates state on success.
-func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPlayersMessage, adminAddr utils.TCPAddress) {
+func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPlayersMessage, adminAddr utils.HostPortProtocol) {
 	var body bytes.Buffer
 	err := messages.EncodeJSONAndEncrypt(&msg, &body, c.aesCipher)
 	if err != nil {
@@ -235,7 +234,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 	}
 
 	// CONSIDER: use ctx along with httpClient.Do
-	url := fmt.Sprintf("%s/player", adminAddr.String())
+	url := fmt.Sprintf("%s/player", adminAddr.HTTPAddressString())
 	resp, err := c.httpClient.Post(url, "application/json", &body)
 	if err != nil {
 		c.Logger.Printf("connectToAdmin error: %s", err.Error())
@@ -477,7 +476,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	messages.EncodeJSONAndEncrypt(&requestBody, &b, c.aesCipher)
 
 	requester := utils.RequestSender{
-		URL:        fmt.Sprintf("%s/%s", c.adminAddr.String(), requestBody.RestPath()),
+		URL:        fmt.Sprintf("%s/%s", c.adminAddr.HTTPAddressString(), requestBody.RestPath()),
 		Method:     "POST",
 		Client:     c.httpClient,
 		BodyReader: &b,
@@ -613,8 +612,8 @@ func (c *PlayerClient) sendCommandToUI(uiCommand UICommand, timeout time.Duratio
 }
 
 // Connects to each player as given in playerNames and playerListenAddrs and sends a AckNewPlayerAddedMessage response to server for each connected player
-func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.TCPAddress) {
-	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.String())
+func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.HostPortProtocol) {
+	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.HTTPAddressString())
 
 	ctxWithTimeout, _ := context.WithTimeout(ctx, 10*time.Second)
 	g, _ := errgroup.WithContext(ctxWithTimeout)
@@ -633,7 +632,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			}
 
 			listenAddr := playerListenAddrs[i]
-			pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddress())
+			pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddressString())
 
 			requestSender := utils.RequestSender{
 				Client:     c.httpClient,
@@ -644,7 +643,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 			_, err := requestSender.Send(ctxWithTimeout)
 			if err != nil {
-				c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddress(), err)
+				c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddressString(), err)
 				return ErrorFailedToConnectToNewPlayer
 			}
 

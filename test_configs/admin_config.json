@@ -1,0 +1,12 @@
+{
+        "type": "admin",
+        "listen_ip": "localhost",
+        "listen_port": 10540,
+        "run_repl": true,
+        "pause_msecs_before_new_turn": 1000,
+        "ready_player_name": "alice",
+        "debug_starting_hand_config_file": "/Users/soumikrakshit/werk/uknow/test_configs/hand_with_wild.json",
+        "aes_key": "55cfb2bd7e7803532bfcc3ca9f08c3e601e68b26d98fd4119dacace2ab668ce3",
+        "encrypt_messages": false,
+        "debug_turn_via_prompt": false
+}
