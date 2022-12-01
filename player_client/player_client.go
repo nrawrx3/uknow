@@ -105,9 +105,9 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
 
 	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
-	go (&dummyCardTransferEventConsumer{
-		decisionEventPullChan: DummyCardTransferEventConsumerChan,
-	}).RunConsumer(c.Logger, c.table.LocalPlayerName)
+	// go (&dummyCardTransferEventConsumer{
+	// 	decisionEventPullChan: DummyCardTransferEventConsumerChan,
+	// }).RunConsumer(c.Logger, c.table.LocalPlayerName)
 
 	return c
 }

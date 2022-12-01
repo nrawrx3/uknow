@@ -170,13 +170,16 @@ What about `wild_draw_4`?
 - Better vis of player of current turn. Same, can be communicated using dedicated game event.
 
 
-## Admin server
+## Server containing multiple admins. Admin <=> game session
 
-Multiple admins in one server process. A superuser should create a new admin when he wants to play a new game.
+Multiple admins in one server process. A superuser should create a new admin
+when he wants to play a new game.
 
 Or is that a bad idea?
 
-Create admins on demand. Any client can create a new game session with a command. Multi-admin then spawns a new admin to serve the game.
+Change the wording from "admin" to "game session". Create admins on demand. Any
+client can create a new game session with a command. Server then spawns a new
+admin to serve the game.
 
 We also need a heartbeat procedure to make sure we're not losing any client.
 

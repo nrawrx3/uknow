@@ -7,7 +7,7 @@ import (
 )
 
 // FILTHY(@rk):TODO(@rk): We will delete this when we implement decision event consuming in the ui itself.
-var DummyCardTransferEventConsumerChan chan uknow.CardTransferEvent
+// var DummyCardTransferEventConsumerChan chan uknow.CardTransferEvent
 
 // FILTHY(@rk):TODO(@rk): See DummyCardTransferEventConsumerChan
 type dummyCardTransferEventConsumer struct {

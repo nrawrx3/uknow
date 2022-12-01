@@ -93,7 +93,7 @@ func RunApp() {
 	}
 
 	// FILTHY(@rk):TODO(@rk): Delete this when done with proper implementation in ui
-	client.DummyCardTransferEventConsumerChan = make(chan uknow.CardTransferEvent)
+	// client.DummyCardTransferEventConsumerChan = make(chan uknow.CardTransferEvent)
 
 	commonConfig, err := cmdcommon.LoadCommonConfig()
 	if err != nil {

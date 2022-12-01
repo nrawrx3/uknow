@@ -89,6 +89,8 @@ func (*PlayerDecisionsSyncEvent) RestPath() string {
 	return "player_decisions_sync"
 }
 
+// TODO: Don't really need this. Simple error codes and/or error messages should
+// be fine.
 type UnwrappedErrorPayload struct {
 	Errors []string `json:"errors"`
 }

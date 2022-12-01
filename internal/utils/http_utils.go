@@ -88,9 +88,15 @@ func ResolveTCPAddress(addr string) (HostPortProtocol, error) {
 
 func CreateHTTPClient() *http.Client {
 	transport := &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 5,                // We rarely, if at all, make many parallel requests to any host, so 5 is a decent pool size.
-		IdleConnTimeout:     10 * time.Minute, // We are working with long connection duration in our gamey use case.
+		MaxIdleConns: 20,
+
+		// We rarely, if at all, make many parallel requests to any
+		// host, so 5 is a decent pool size.
+		MaxIdleConnsPerHost: 5,
+
+		// We are working with long connection duration in our gamey use
+		// case.
+		IdleConnTimeout: 5 * time.Minute,
 	}
 
 	return &http.Client{
