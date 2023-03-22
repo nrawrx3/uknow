@@ -39,18 +39,13 @@ func (t *HostPortProtocol) HTTPAddressString() string {
 	}
 }
 
-func (t *HostPortProtocol) ProtocolAddressString() string {
-	protocol := "http"
-	if t.Protocol != "" {
-		protocol = t.Protocol
-	}
-	return fmt.Sprintf("%s://%s:%d", protocol, t.IP, t.Port)
-}
-
 // This is the address string to use as arguments to net.Dial or net.Listen
 // functions.
 func (t *HostPortProtocol) BindString() string {
-	return fmt.Sprintf("%s:%d", t.IP, t.Port)
+	if t.Port != 0 {
+		return fmt.Sprintf("%s:%d", t.IP, t.Port)
+	}
+	return t.IP
 }
 
 // func ConcatHostPort(protocol string, host string, port int) string {
