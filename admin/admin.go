@@ -172,7 +172,7 @@ const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
 func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
-	admin.logger.Printf("addNewPlayer receeived from %s", r.URL.Host)
+	admin.logger.Printf("addNewPlayer receeived from %s", r.RemoteAddr)
 
 	admin.stateMutex.Lock()
 	defer admin.stateMutex.Unlock()
@@ -188,7 +188,7 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 
 	err := messages.DecryptAndDecodeJSON(&msg, r.Body, admin.aesCipher)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -199,10 +199,9 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newPlayerName := msg.PlayerNames[0]
-	newPlayerListenAddr := msg.ClientListenAddrs[0]
-
+	newPlayerAdvertisedAddr := msg.ClientListenAddrs[0]
 	// Tell existing players about the new player
-	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerListenAddr.IP, newPlayerListenAddr.Port)
+	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerAdvertisedAddr.IP, newPlayerAdvertisedAddr.Port)
 
 	// Add the player to the local table. **But don't if it's already added
 	// by hand-reader - in which case check that we have this player in the
@@ -229,12 +228,12 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add the player's listen address
-	admin.listenAddrOfPlayer[newPlayerName] = newPlayerListenAddr
+	admin.listenAddrOfPlayer[newPlayerName] = newPlayerAdvertisedAddr
 	// Set it as shuffler, although it doesn't matter
 	admin.shuffler = newPlayerName
 
 	// Tell existing players about new player asynchronously
-	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerListenAddr.IP, newPlayerListenAddr.Port)
+	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerAdvertisedAddr.IP, newPlayerAdvertisedAddr.Port)
 
 	// Tell the new player about existing players. This is by sending AddNewPlayersMessage as a response containing the existing players info.
 	var respAddNewPlayersMessage messages.AddNewPlayersMessage
@@ -244,23 +243,21 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		admin.logger.Printf("Telling existing player '%s' about '%s'", playerName, newPlayerName)
-		addr, err := utils.ResolveTCPAddress(playerListenAddr.HTTPAddressString())
-		if err != nil {
-			admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
-			w.WriteHeader(http.StatusInternalServerError)
-			messages.WriteErrorPayload(w, err)
-			continue
-		}
-		respAddNewPlayersMessage.Add(playerName, addr.IP, addr.Port, "http")
+		// addr, err := utils.ResolveTCPAddress(playerListenAddr.HTTPAddressString())
+		// if err != nil {
+		// 	admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
+		// 	w.WriteHeader(http.StatusInternalServerError)
+		// 	messages.WriteErrorPayload(w, err)
+		// 	continue
+		// }
+		respAddNewPlayersMessage.Add(playerName, playerListenAddr.IP, playerListenAddr.Port, "http")
 
 		// Also add an expecting-ack that admin should receive from the new player for connecting to each of the existing players.
-
 		admin.expectedAcksList.addPending(expectedAck{ackerPlayerName: newPlayerName, ackId: makeAckIdConnectedPlayer(newPlayerName, playerName)}, 10*time.Second, func() {}, func() {
 			admin.logger.Printf("Ack timeout: new player %s could not connect to existing player %s in time", newPlayerName, playerName)
 		})
 	}
 
-	w.WriteHeader(http.StatusOK)
 	messages.EncodeJSONAndEncrypt(&respAddNewPlayersMessage, w, admin.aesCipher)
 }
 
@@ -373,18 +370,23 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	senderPlayerName, err := playerWithAddress(senderAddr, admin.listenAddrOfPlayer)
-	if err != nil {
-		admin.logger.Printf("%s", err)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
+	// TODO: Ignore who calls set_ready. If this was not a toy, we would use AED
+	// (over HTTPS) to store a token in the player client after she joins. This
+	// will
+	// then be expected for each request by the player client - just like cookies.
+	//
+	// senderPlayerName, err := playerWithAddress(senderAddr,
+	// admin.listenAddrOfPlayer) if err != nil {
+	//  admin.logger.Printf("%s", err)
+	//  w.WriteHeader(http.StatusForbidden)
+	//  return
+	// }
 
-	if admin.readyPlayerName != "" && (senderPlayerName != admin.readyPlayerName) {
-		admin.logger.Printf("player %s not set as setReadyPlayer", senderPlayerName)
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
+	// if admin.readyPlayerName != "" && (senderPlayerName != admin.readyPlayerName) {
+	// 	admin.logger.Printf("player %s not set as setReadyPlayer", senderPlayerName)
+	// 	w.WriteHeader(http.StatusForbidden)
+	// 	return
+	// }
 
 	admin.logger.Printf("handleSetReady: called from address: %s", senderAddr.BindString())
 
@@ -400,6 +402,8 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	admin.expectedAcksList.mu.Lock()
 	numExpectingAcks := len(admin.expectedAcksList.pendingAcks)
+
+	admin.logger.Printf("acquired expectedAcksList.mu.Lock()")
 
 	if numExpectingAcks != 0 {
 		admin.expectedAcksList.mu.Unlock()

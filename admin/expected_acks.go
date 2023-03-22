@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/exp/slices"
 )
 
 // A struct containing info about acks being waited on by server. Note that
@@ -31,6 +33,7 @@ func (ack expectedAck) equal(ack1 expectedAck) bool {
 type expectedAcksList struct {
 	mu               sync.Mutex
 	pendingAcks      []*pendingAck
+	preemptiveAcks   []expectedAck
 	chNewAckReceived chan expectedAck
 	logger           *log.Logger
 }
@@ -38,6 +41,7 @@ type expectedAcksList struct {
 func newExpectedAcksState(logger *log.Logger) *expectedAcksList {
 	return &expectedAcksList{
 		pendingAcks:      make([]*pendingAck, 0, 16),
+		preemptiveAcks:   make([]expectedAck, 0, 16),
 		chNewAckReceived: make(chan expectedAck),
 		logger:           logger,
 	}
@@ -45,6 +49,7 @@ func newExpectedAcksState(logger *log.Logger) *expectedAcksList {
 
 func (es *expectedAcksList) addPending(ack expectedAck, timeout time.Duration, onAck, onTimeout func()) {
 	es.mu.Lock()
+	defer es.mu.Unlock()
 	es.logger.Printf("Adding new expecting ack to list %+v", ack)
 
 	pendingAck := &pendingAck{
@@ -54,6 +59,20 @@ func (es *expectedAcksList) addPending(ack expectedAck, timeout time.Duration, o
 		onAck:           onAck,
 		onTimeout:       onTimeout,
 		ackReceivedChan: make(chan struct{}),
+	}
+
+	// Check if there is already an ack for this pending
+	for i, ack := range es.preemptiveAcks {
+		if ack.equal(pendingAck.expectedAck) {
+			es.preemptiveAcks = slices.Delete(es.preemptiveAcks, i, i+1)
+			es.logger.Printf("found matching preemptive ack: %+v", ack)
+
+			// Horrible
+			go func() {
+				pendingAck.ackReceivedChan <- struct{}{}
+			}()
+			return
+		}
 	}
 
 	go func() {
@@ -68,7 +87,6 @@ func (es *expectedAcksList) addPending(ack expectedAck, timeout time.Duration, o
 	}()
 
 	es.pendingAcks = append(es.pendingAcks, pendingAck)
-	es.mu.Unlock()
 }
 
 func (es *expectedAcksList) ackIds() string {
@@ -86,6 +104,8 @@ func (es *expectedAcksList) waitForAcks() {
 	for expectedAck := range es.chNewAckReceived {
 		es.mu.Lock()
 
+		haveMatchingPendingAck := false
+
 		for i, pendingAck := range es.pendingAcks {
 			if !pendingAck.expectedAck.equal(expectedAck) {
 				continue
@@ -93,9 +113,14 @@ func (es *expectedAcksList) waitForAcks() {
 
 			es.logger.Printf("Acking the ack: %s", pendingAck.ackId)
 
+			es.pendingAcks = slices.Delete(es.pendingAcks, i, i+1)
 			pendingAck.ackReceivedChan <- struct{}{}
-			es.pendingAcks = append(es.pendingAcks[0:i], es.pendingAcks[i+1:len(es.pendingAcks)]...)
+			haveMatchingPendingAck = true
 			break
+		}
+
+		if !haveMatchingPendingAck {
+			es.preemptiveAcks = append(es.preemptiveAcks, expectedAck)
 		}
 
 		es.mu.Unlock()
