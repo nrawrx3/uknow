@@ -85,7 +85,8 @@ func RunApp() {
 			Port:     clientConfig.CommandListenPort,
 			Protocol: "http",
 		},
-		AESCipher: aesCipher,
+		AESCipher:   aesCipher,
+		AdvertiseIP: clientConfig.AdvertiseIP,
 	}
 
 	if clientConfig.AdminHostIP != "" && clientConfig.AdminPort != 0 {

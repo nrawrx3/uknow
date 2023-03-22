@@ -10,6 +10,8 @@ type ClientUserConfig struct {
 	CommandListenIP   string `json:"command_listen_ip"`
 	CommandListenPort int    `json:"command_listen_port"`
 
+	AdvertiseIP string `json:"advertise_ip"`
+
 	// The default admin address to connect to using `connect_default` command.
 	AdminHostIP     string `json:"admin_host_ip"`
 	AdminPort       int    `json:"admin_port"`
