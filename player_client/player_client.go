@@ -62,6 +62,7 @@ type PlayerClient struct {
 	httpClient         *http.Client
 	neighborListenAddr map[string]utils.HostPortProtocol
 	adminAddr          utils.HostPortProtocol
+	advertiseIP        string
 
 	// Exposes the player API to the game admin.
 	router *mux.Router
@@ -78,6 +79,7 @@ type ConfigNewPlayerClient struct {
 	// HttpListenAddr             string
 	ListenAddr       utils.HostPortProtocol
 	DefaultAdminAddr utils.HostPortProtocol
+	AdvertiseIP      string
 	AESCipher        *uknow.AESCipher
 }
 
@@ -91,6 +93,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
 		adminAddr:          config.DefaultAdminAddr,
 		aesCipher:          config.AESCipher,
+		advertiseIP:        config.AdvertiseIP,
 	}
 
 	c.router = mux.NewRouter()
@@ -155,7 +158,7 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 				c.Logger.Fatal(err)
 			}
 
-			msg.Add(c.table.LocalPlayerName, listenAddr.IP, listenAddr.Port, "http")
+			msg.Add(c.table.LocalPlayerName, c.advertiseIP, 0, "http")
 
 			// Lock and check if we have the correct state. Connect to admin if yes.
 			c.stateMutex.Lock()
@@ -302,8 +305,10 @@ func (c *PlayerClient) handleAddNewPlayers(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Set up the connection to the new player without blocking the http response to this call,
-	// otherwise we're going to have a deadlock with the other client.
+	// Set up the connection to the new player without blocking the http response
+	// to this call, otherwise we're going to have a deadlock with the other
+	// client.
+	//
 	go func() {
 		c.stateMutex.Lock()
 		defer c.stateMutex.Unlock()
@@ -623,29 +628,34 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 		playerName := playerName
 
 		g.Go(func() error {
-			c.Logger.Printf("connectToEachPlayer: Local player %s connecting to %s", c.table.LocalPlayerName, playerName)
+			// TODO: Remove this commented code. We don't actually connect player to
+			// player (p2p). But admin still expects an ack, for now just send that
+			// ack message without doing anything.
 
-			_, exists := c.neighborListenAddr[playerName]
-			if exists || playerName == c.table.LocalPlayerName {
-				return nil
+			// c.Logger.Printf("connectToEachPlayer: Local player %s connecting to
+			// %s", c.table.LocalPlayerName, playerName)
 
-			}
+			// _, exists := c.neighborListenAddr[playerName]
+			// if exists || playerName == c.table.LocalPlayerName {
+			// 	return nil
+
+			// }
 
 			listenAddr := playerListenAddrs[i]
-			pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddressString())
+			// pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddressString())
 
-			requestSender := utils.RequestSender{
-				Client:     c.httpClient,
-				Method:     "GET",
-				URL:        pingURL,
-				BodyReader: nil,
-			}
+			// requestSender := utils.RequestSender{
+			// 	Client:     c.httpClient,
+			// 	Method:     "GET",
+			// 	URL:        pingURL,
+			// 	BodyReader: nil,
+			// }
 
-			_, err := requestSender.Send(ctxWithTimeout)
-			if err != nil {
-				c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddressString(), err)
-				return ErrorFailedToConnectToNewPlayer
-			}
+			// _, err := requestSender.Send(ctxWithTimeout)
+			// if err != nil {
+			// 	c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddressString(), err)
+			// 	return ErrorFailedToConnectToNewPlayer
+			// }
 
 			c.neighborListenAddr[playerName] = listenAddr
 
@@ -659,7 +669,7 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 			var b bytes.Buffer
 			messages.EncodeJSONAndEncrypt(&ackMsg, &b, c.aesCipher)
 
-			requestSender = utils.RequestSender{
+			requestSender := utils.RequestSender{
 				Client:     c.httpClient,
 				Method:     "POST",
 				URL:        adminURL,

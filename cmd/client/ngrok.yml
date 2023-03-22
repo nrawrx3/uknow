@@ -1,0 +1,11 @@
+tunnels:
+    john:
+        addr: 10531
+        proto: http
+        schemes: [http]
+    alice:
+        addr: 10530
+        proto: http
+        schemes: [http]
+version: "2"
+region: us
