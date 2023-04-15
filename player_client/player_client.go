@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +51,7 @@ type PlayerClient struct {
 	table *uknow.Table
 
 	// Server used to service requests made by admin and other players
-	httpServer *http.Server
+	// httpServer *http.Server
 
 	aesCipher *uknow.AESCipher
 
@@ -87,7 +90,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	c := &PlayerClient{
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
-		httpClient:         utils.CreateHTTPClient(),
+		httpClient:         utils.CreateHTTPClient(10 * time.Minute),
 		neighborListenAddr: make(map[string]utils.HostPortProtocol),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
@@ -100,12 +103,12 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 
 	c.initRouterHandlers()
 
-	c.httpServer = &http.Server{
-		Addr:    config.ListenAddr.BindString(),
-		Handler: c.router,
-	}
+	// c.httpServer = &http.Server{
+	// 	Addr:    config.ListenAddr.BindString(),
+	// 	Handler: c.router,
+	// }
 
-	c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
+	// c.Logger.Printf("Bind address = %s", c.httpServer.Addr)
 
 	// FILTHY(@rk):TODO(@rk): Delete this, see type definition
 	// go (&dummyCardTransferEventConsumer{
@@ -115,13 +118,13 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 	return c
 }
 
-func (c *PlayerClient) RunServer() {
-	c.Logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
-	err := c.httpServer.ListenAndServe()
-	if err != nil {
-		log.Panicf("PlayerClient.RunServer() failed: %s", err.Error())
-	}
-}
+// func (c *PlayerClient) RunServer() {
+// 	c.Logger.Printf("Servicing admin commands at %s", c.httpServer.Addr)
+// 	err := c.httpServer.ListenAndServe()
+// 	if err != nil {
+// 		log.Panicf("PlayerClient.RunServer() failed: %s", err.Error())
+// 	}
+// }
 
 // Meant to be running in its goroutine. Handles non-play or inspect related commands.
 func (c *PlayerClient) RunGeneralCommandHandler() {
@@ -153,10 +156,10 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 
 			var msg messages.AddNewPlayersMessage
 
-			listenAddr, err := utils.ResolveTCPAddress(c.httpServer.Addr)
-			if err != nil {
-				c.Logger.Fatal(err)
-			}
+			// listenAddr, err := utils.ResolveTCPAddress(c.httpServer.Addr)
+			// if err != nil {
+			// 	c.Logger.Fatal(err)
+			// }
 
 			msg.Add(c.table.LocalPlayerName, c.advertiseIP, 0, "http")
 
@@ -167,8 +170,9 @@ func (c *PlayerClient) RunGeneralCommandHandler() {
 				c.stateMutex.Unlock()
 				continue
 			}
-			c.Logger.Printf("Will be sending listenAddr %+v to admin", listenAddr)
-			c.connectToAdmin(ctx, msg, adminAddr)
+			// c.Logger.Printf("Will be sending listenAddr %+v to admin", listenAddr)
+			// c.connectToAdmin(ctx, msg, adminAddr)
+			go c.connectToAdminAndStartSSEController(ctx, msg, adminAddr)
 			c.stateMutex.Unlock()
 
 		case CmdDeclareReady:
@@ -259,7 +263,7 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 			c.Logger.Printf("Will connect to currently existing players: %+v", respMsg)
 
 			c.clientState = WaitingForAdminToServeCards
-			go c.connectToEachPlayer(ctx, respMsg.PlayerNames, respMsg.ClientListenAddrs)
+			go c.noteEachPlayer(ctx, respMsg.PlayerNames, respMsg.ClientListenAddrs)
 		}
 	default:
 		c.Logger.Fatalf("connectToAdmin: Unexpected response: %s", resp.Status)
@@ -267,7 +271,8 @@ func (c *PlayerClient) connectToAdmin(ctx context.Context, msg messages.AddNewPl
 }
 
 func (c *PlayerClient) logToWindow(format string, args ...interface{}) {
-	format = "Client: " + format
+	_, file, line, _ := runtime.Caller(1)
+	format = c.table.LocalPlayerName + ":" + path.Base(file) + ":" + strconv.FormatInt(int64(line), 10) + " " + format
 	message := fmt.Sprintf(format, args...)
 	c.LogWindowPushChan <- message
 	c.Logger.Print(message)
@@ -312,7 +317,7 @@ func (c *PlayerClient) handleAddNewPlayers(w http.ResponseWriter, r *http.Reques
 	go func() {
 		c.stateMutex.Lock()
 		defer c.stateMutex.Unlock()
-		c.connectToEachPlayer(context.Background(), msg.PlayerNames, msg.ClientListenAddrs)
+		c.noteEachPlayer(context.Background(), msg.PlayerNames, msg.ClientListenAddrs)
 	}()
 
 	// Respond with an OK but add to the map later. Admin will be expecting this response before
@@ -356,7 +361,7 @@ func (c *PlayerClient) handleServedCardsEvent(w http.ResponseWriter, r *http.Req
 	defer c.stateMutex.Unlock()
 
 	if c.clientState != WaitingForAdminToServeCards {
-		c.Logger.Printf("Unexpected admin event: %s", servedCardsEvent.RestPath())
+		c.Logger.Printf("Unexpected admin event: %s", servedCardsEvent.EventType())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -395,7 +400,7 @@ func (c *PlayerClient) handleChosenPlayerEvent(w http.ResponseWriter, r *http.Re
 	defer c.stateMutex.Unlock()
 
 	if c.clientState != WaitingForAdminToChoosePlayer {
-		c.Logger.Printf("Unexpected admin event: %s", chosenPlayerEvent.RestPath())
+		c.Logger.Printf("Unexpected admin event: %s", chosenPlayerEvent.EventType())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -471,7 +476,7 @@ func (c *PlayerClient) askAndRunUserDecisions(decisionEventCounter int) {
 	c.Logger.Printf("Done receiving player decision events from ClientUI")
 
 	// Send decisions to admin
-	requestBody := messages.PlayerDecisionsEvent{
+	requestBody := messages.PlayerDecisionsRequest{
 		Decisions:            decisions,
 		DecidingPlayer:       c.table.LocalPlayerName,
 		DecisionEventCounter: decisionEventCounter,
@@ -617,49 +622,19 @@ func (c *PlayerClient) sendCommandToUI(uiCommand UICommand, timeout time.Duratio
 }
 
 // Connects to each player as given in playerNames and playerListenAddrs and sends a AckNewPlayerAddedMessage response to server for each connected player
-func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.HostPortProtocol) {
+func (c *PlayerClient) noteEachPlayer(ctx context.Context, playerNames []string, playerListenAddrs []utils.HostPortProtocol) {
+	c.logToWindow("noting each player and sending ack: %+v", playerNames)
+
 	adminURL := fmt.Sprintf("%s/ack_player_added", c.adminAddr.HTTPAddressString())
 
 	ctxWithTimeout, _ := context.WithTimeout(ctx, 10*time.Second)
 	g, _ := errgroup.WithContext(ctxWithTimeout)
 
-	for i, playerName := range playerNames {
-		i := i
+	for _, playerName := range playerNames {
 		playerName := playerName
 
 		g.Go(func() error {
-			// TODO: Remove this commented code. We don't actually connect player to
-			// player (p2p). But admin still expects an ack, for now just send that
-			// ack message without doing anything.
-
-			// c.Logger.Printf("connectToEachPlayer: Local player %s connecting to
-			// %s", c.table.LocalPlayerName, playerName)
-
-			// _, exists := c.neighborListenAddr[playerName]
-			// if exists || playerName == c.table.LocalPlayerName {
-			// 	return nil
-
-			// }
-
-			listenAddr := playerListenAddrs[i]
-			// pingURL := fmt.Sprintf("%s/ping", listenAddr.HTTPAddressString())
-
-			// requestSender := utils.RequestSender{
-			// 	Client:     c.httpClient,
-			// 	Method:     "GET",
-			// 	URL:        pingURL,
-			// 	BodyReader: nil,
-			// }
-
-			// _, err := requestSender.Send(ctxWithTimeout)
-			// if err != nil {
-			// 	c.Logger.Printf("POST /players - Failed to ping player %s at address %s. Error: %s", playerName, listenAddr.HTTPAddressString(), err)
-			// 	return ErrorFailedToConnectToNewPlayer
-			// }
-
-			c.neighborListenAddr[playerName] = listenAddr
-
-			c.Logger.Printf("Local player %s Successfully connected to %s, will send ack to admin", c.table.LocalPlayerName, playerName)
+			c.Logger.Printf("Local player %s noted %s, will send ack to admin", c.table.LocalPlayerName, playerName)
 
 			ackMsg := messages.AckNewPlayerAddedMessage{
 				AckerPlayer: c.table.LocalPlayerName,
@@ -691,5 +666,41 @@ func (c *PlayerClient) connectToEachPlayer(ctx context.Context, playerNames []st
 
 	if err != nil {
 		c.Logger.Printf("One or more ack messages failed. Error: %s", err)
+	}
+}
+
+func (c *PlayerClient) connectToAdminAndStartSSEController(ctx context.Context, msg messages.AddNewPlayersMessage, adminAddr utils.HostPortProtocol) {
+	var requestBody bytes.Buffer
+	if err := messages.EncodeJSONAndEncrypt(&msg, &requestBody, c.aesCipher); err != nil {
+		c.Logger.Fatal(err)
+	}
+
+	url := fmt.Sprintf("%s/player", adminAddr.HTTPAddressString())
+
+	c.logToWindow("Calling %s", url)
+
+	req, err := http.NewRequest("POST", url, &requestBody)
+	if err != nil {
+		c.logToWindow("failed to create request toi %s: %v", url, err)
+		return
+	}
+
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Connection", "keep-alive")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.logToWindow("failed to connect to admin: %v", err)
+		return
+	}
+
+	c.logToWindow("POST %s %+v response code: %s", url, msg, resp.Status)
+
+	switch resp.StatusCode {
+	case http.StatusSeeOther:
+		c.logToWindow("connectToAdmin: Local player is already present in admin's table")
+	case http.StatusOK:
+		c.sseController(resp)
 	}
 }

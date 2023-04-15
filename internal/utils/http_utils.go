@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -81,7 +82,7 @@ func ResolveTCPAddress(addr string) (HostPortProtocol, error) {
 	}, nil
 }
 
-func CreateHTTPClient() *http.Client {
+func CreateHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
 		MaxIdleConns: 20,
 
@@ -95,7 +96,7 @@ func CreateHTTPClient() *http.Client {
 	}
 
 	return &http.Client{
-		Timeout:   20 * time.Second,
+		Timeout:   timeout,
 		Transport: transport,
 	}
 }
@@ -150,4 +151,23 @@ func MakeHTTPRequestWithTimeout(
 
 	resp, err := client.Do(req)
 	return resp, err
+}
+
+func SetSSEResponseHeaders(responseWriter http.ResponseWriter) {
+	responseWriter.Header().Set("Content-Type", "text/event-stream")
+	responseWriter.Header().Set("Cache-Control", "no-cache")
+	responseWriter.Header().Set("Connection", "keep-alive")
+}
+
+func WriteJsonWithNewline(w io.Writer, data interface{}) error {
+	encoder := json.NewEncoder(w)
+	err := encoder.Encode(data)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "\n")
+	if err != nil {
+		return err
+	}
+	return nil
 }

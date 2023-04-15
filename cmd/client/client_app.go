@@ -110,7 +110,7 @@ func RunApp() {
 
 	c := client.NewPlayerClient(playerClientConfig)
 
-	go c.RunServer()
+	// go c.RunServer()
 	go c.RunGeneralCommandHandler()
 
 	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", clientConfig.PlayerName))
