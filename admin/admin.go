@@ -242,8 +242,36 @@ func (admin *Admin) handleAddNewPlayerAndCreateSSE(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if len(requestMessage.PlayerNames) == 0 {
+		http.Error(w, fmt.Sprintf("Expected exactly 1 player name, got %d", len(requestMessage.PlayerNames)), http.StatusBadRequest)
+	}
+
 	joinerPlayerName := requestMessage.PlayerNames[0]
 	utils.SetSSEResponseHeaders(w)
+
+	// Add the player to the local table. **But don't if it's already added
+	// by hand-reader - in which case check that we have this player in the
+	// table module.**
+	if admin.table.IsShuffled {
+		_, ok := admin.table.HandOfPlayer[joinerPlayerName]
+		if !ok {
+			admin.logger.Printf("player %s has not been loaded by hand-reader. see the JSON config.", joinerPlayerName)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		}
+	} else {
+		err := admin.table.AddPlayer(joinerPlayerName)
+		if errors.Is(err, uknow.ErrPlayerAlreadyExists) {
+			w.WriteHeader(http.StatusOK)
+			admin.logger.Printf("player %s already exists", joinerPlayerName)
+			return
+		}
+
+		if err != nil {
+			http.Error(w, fmt.Sprintf("cannot add new player: %s", err), http.StatusUnprocessableEntity)
+			admin.logger.Printf("Cannot add new player: %s", err)
+			return
+		}
+	}
 
 	// Rest of the work is going to be done in the controller
 	notifyControllerExit := make(chan struct{})
@@ -551,7 +579,7 @@ func (admin *Admin) dispatchEventWithSSE(ctlEvent sseEvent) {
 				return
 			}
 
-			// Sync the player decision wwith all other players
+			// Sync the player decision with all other players
 			admin.setState(SyncingPlayerDecision)
 			admin.updatePromptWithStateInfo()
 
@@ -560,6 +588,8 @@ func (admin *Admin) dispatchEventWithSSE(ctlEvent sseEvent) {
 				admin.logger.Printf("Failed to broadcast player decisions event: %v", err)
 				return
 			}
+
+			// TODO: Since we're using SSE, instead of HTTP request-response, we need asynchronous acking of the decisions being synced by the server.
 			admin.decisionEventsCompleted++
 			admin.setState(DoneSyncingPlayerDecision)
 			go admin.runNewTurn()

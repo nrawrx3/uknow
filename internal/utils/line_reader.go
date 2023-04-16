@@ -48,7 +48,7 @@ func (reader *LineReader) Read(p []byte) (n int, err error) {
 
 func (reader *LineReader) flushCurrentLine(p []byte) (n int, err error) {
 	bytesCopied := copy(p, reader.remainingPrevLine)
-	reader.logger.Printf("flushing [%s], copied upto [%s]", reader.remainingPrevLine, p)
+	reader.logger.Printf("flushing [%s], copied upto [%s]", reader.remainingPrevLine[:bytesCopied], p)
 	if bytesCopied < len(reader.remainingPrevLine) {
 		reader.logger.Printf("should not usually be here: bytesCopied: %d, remainingPrevLine: %d", bytesCopied, len(reader.remainingPrevLine))
 		reader.remainingPrevLine = reader.remainingPrevLine[bytesCopied:]

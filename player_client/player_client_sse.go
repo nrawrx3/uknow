@@ -30,8 +30,11 @@ func (c *PlayerClient) sseController(response *http.Response) {
 
 	// Send an ack to admin
 	c.noteEachPlayer(context.Background(), firstMessage.PlayerNames, nil)
-
 	c.logToWindow("done sending ack to admin after receiving first existing players list event message")
+
+	c.stateMutex.Lock()
+	c.clientState = WaitingForAdminToServeCards
+	c.stateMutex.Unlock()
 
 	// Now start the loop
 
@@ -105,6 +108,7 @@ func (c *PlayerClient) sseController(response *http.Response) {
 					c.logToWindow("↑ YOUR TURN ↑ ")
 					go c.askAndRunUserDecisions(ev.DecisionEventCounter)
 				} else {
+					c.clientState = WaitingForDecisionSync
 					c.logToWindow("PLAYER %s's TURN", ev.PlayerName)
 				}
 			}()
@@ -127,6 +131,7 @@ func (c *PlayerClient) sseController(response *http.Response) {
 				c.Logger.Printf("Evaluating player_decisions_sync, deciding player: %s, decisions count: %d, decisions: %+v, COUNTER: %d", ev.DecidingPlayer, len(ev.Decisions), ev.Decisions, ev.DecisionEventCounter)
 				c.table.EvalPlayerDecisions(ev.DecidingPlayer, ev.Decisions, c.GameEventPushChan)
 
+				c.clientState = WaitingForAdminToChoosePlayer
 				c.Logger.Printf("Done evaluating player %s's %d decisions, COUNTER: %d", ev.DecidingPlayer, len(ev.Decisions), ev.DecisionEventCounter)
 			}()
 		}
