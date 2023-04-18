@@ -10,10 +10,10 @@ import (
 	"os"
 
 	ui "github.com/gizak/termui/v3"
-	"github.com/rksht/uknow"
-	cmdcommon "github.com/rksht/uknow/cmd"
-	"github.com/rksht/uknow/internal/utils"
-	client "github.com/rksht/uknow/player_client"
+	"github.com/nrawrx3/uknow"
+	cmdcommon "github.com/nrawrx3/uknow/cmd"
+	"github.com/nrawrx3/uknow/internal/utils"
+	client "github.com/nrawrx3/uknow/player_client"
 )
 
 var configFile string
@@ -110,7 +110,7 @@ func RunApp() {
 
 	c := client.NewPlayerClient(playerClientConfig)
 
-	go c.RunServer()
+	// go c.RunServer()
 	go c.RunGeneralCommandHandler()
 
 	uiLogger := uknow.CreateFileLogger(false, fmt.Sprintf("ui_%s", clientConfig.PlayerName))

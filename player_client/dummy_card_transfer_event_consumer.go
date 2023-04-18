@@ -3,7 +3,7 @@ package client
 import (
 	"log"
 
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 // FILTHY(@rk):TODO(@rk): We will delete this when we implement decision event consuming in the ui itself.

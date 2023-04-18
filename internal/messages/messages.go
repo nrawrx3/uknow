@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 
-	"github.com/rksht/uknow"
-	"github.com/rksht/uknow/internal/utils"
+	"github.com/nrawrx3/uknow"
+	"github.com/nrawrx3/uknow/internal/utils"
 )
 
 type AddNewPlayersMessage struct {
@@ -46,19 +47,74 @@ type SetReadyMessage struct {
 	ShufflerIsFirstPlayer bool   `json:"shuffler_is_first_player"`
 }
 
-// Event messages are used to communicate "stuff" between the clients and admin.
-// The REST path for events is POST /events/<event_name> for both client and
-// admin. These are distinct from uknow.GameEvent.
-type EventMessage interface {
-	RestPath() string
+// Event messages are what the admin sends to the client.
+type ServerEvent interface {
+	EventType() EventType
+}
+
+type EventType string
+
+const (
+	EventTypePlayerJoined        EventType = "player_joined"
+	EventTypeExistingPlayersList EventType = "existing_players_list"
+	EventTypeServedCards         EventType = "served_cards"
+	EventTypeChosenPlayer        EventType = "chosen_player"
+	EventTypePlayerDecisionsSync EventType = "player_decisions_sync"
+)
+
+type ServerEventMessage struct {
+	Type  EventType   `json:"type"`
+	Event ServerEvent `json:"event"`
+}
+
+func DecodeEvent[T ServerEvent](in []byte) (T, error) {
+	var out struct {
+		Event T `json:"event"`
+	}
+
+	err := json.NewDecoder(bytes.NewReader(in)).Decode(&out)
+	if err != nil {
+		log.Printf("received %s decoded: %+v", in, out)
+	}
+	return out.Event, err
+}
+
+// Meant to be used in client sse
+func ParseServerEventMessage(b []byte) (ServerEvent, error) {
+	// Treat as {"type": ...} to get the event type first and then use the proper output type
+	var onlyType struct{ Type EventType }
+	err := json.NewDecoder(bytes.NewReader(b)).Decode(&onlyType)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse event type: %w", err)
+	}
+
+	switch onlyType.Type {
+	case EventTypePlayerJoined:
+		return DecodeEvent[PlayerJoinedEvent](b)
+	case EventTypeExistingPlayersList:
+		return DecodeEvent[ExistingPlayersListEvent](b)
+	case EventTypeServedCards:
+		return DecodeEvent[ServedCardsEvent](b)
+	case EventTypeChosenPlayer:
+		return DecodeEvent[ChosenPlayerEvent](b)
+	case EventTypePlayerDecisionsSync:
+		return DecodeEvent[PlayerDecisionsSyncEvent](b)
+	}
+	return nil, fmt.Errorf("unknown event, could not parse type: %v", onlyType.Type)
+}
+
+// As opposed to AddNewPlayerMessage, we're sending this as SSE event so want a
+// message that implements EventMessage
+type PlayerJoinedEvent struct {
+	PlayerName string `json:"player_name"`
+}
+
+type ExistingPlayersListEvent struct {
+	PlayerNames []string `json:"player_names"`
 }
 
 type ServedCardsEvent struct {
 	Table uknow.Table `json:"table"`
-}
-
-func (*ServedCardsEvent) RestPath() string {
-	return "served_cards"
 }
 
 type ChosenPlayerEvent struct {
@@ -66,27 +122,25 @@ type ChosenPlayerEvent struct {
 	DecisionEventCounter int    `json:"decision_event_counter"`
 }
 
-func (*ChosenPlayerEvent) RestPath() string {
-	return "chosen_player"
+type PlayerDecisionsSyncEvent struct {
+	PlayerDecisionsRequest
 }
 
+func (PlayerJoinedEvent) EventType() EventType        { return EventTypePlayerJoined }
+func (ExistingPlayersListEvent) EventType() EventType { return EventTypeExistingPlayersList }
+func (ServedCardsEvent) EventType() EventType         { return EventTypeServedCards }
+func (ChosenPlayerEvent) EventType() EventType        { return EventTypeChosenPlayer }
+func (PlayerDecisionsSyncEvent) EventType() EventType { return EventTypePlayerDecisionsSync }
+
 // Wraps a sequence of player decisions from a single player in an event.
-type PlayerDecisionsEvent struct {
+type PlayerDecisionsRequest struct {
 	Decisions            []uknow.PlayerDecision `json:"decisions"`
 	DecidingPlayer       string                 `json:"deciding_player"`
 	DecisionEventCounter int                    `json:"decision_event_counter"` // counter for tracking/debugging decisions in case of disconnections
 }
 
-func (*PlayerDecisionsEvent) RestPath() string {
+func (*PlayerDecisionsRequest) RestPath() string {
 	return "player_decisions"
-}
-
-type PlayerDecisionsSyncEvent struct {
-	PlayerDecisionsEvent
-}
-
-func (*PlayerDecisionsSyncEvent) RestPath() string {
-	return "player_decisions_sync"
 }
 
 // TODO: Don't really need this. Simple error codes and/or error messages should

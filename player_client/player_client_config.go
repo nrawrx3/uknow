@@ -1,7 +1,7 @@
 package client
 
 import (
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 type ClientUserConfig struct {

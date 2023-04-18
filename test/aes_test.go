@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 func TestEncryptWithAES(t *testing.T) {

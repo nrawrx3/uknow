@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 /*

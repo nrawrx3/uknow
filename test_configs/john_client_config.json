@@ -3,7 +3,7 @@
         "command_listen_ip": "0.0.0.0",
         "command_listen_port": 10531,
         "advertise_ip": "9a3d-49-207-230-204.ngrok.io",
-        "admin_host_ip": "smolbox",
+        "admin_host_ip": "localhost",
         "admin_port": 10540,
         "player_name": "john"
 }

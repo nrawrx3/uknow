@@ -17,10 +17,10 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/gorilla/mux"
-	"github.com/rksht/uknow"
-	"github.com/rksht/uknow/hand_reader"
-	"github.com/rksht/uknow/internal/messages"
-	"github.com/rksht/uknow/internal/utils"
+	"github.com/nrawrx3/uknow"
+	"github.com/nrawrx3/uknow/hand_reader"
+	"github.com/nrawrx3/uknow/internal/messages"
+	"github.com/nrawrx3/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -29,7 +29,6 @@ var (
 
 	errorWaitingForAcks    = errors.New("waiting for acks")
 	errorInvalidAdminState = errors.New("invalid admin state")
-	errorUnknownPlayer     = errors.New("unknown player")
 )
 
 type AdminState string
@@ -45,15 +44,6 @@ const (
 	DoneSyncingPlayerDecision         AdminState = "done_syncing_player_decision"
 	HaveWinner                        AdminState = "have_winner"
 )
-
-func playerWithAddress(addr utils.HostPortProtocol, listenAddrOfPlayer map[string]utils.HostPortProtocol) (string, error) {
-	for playerName, valAddr := range listenAddrOfPlayer {
-		if valAddr.IP == addr.IP {
-			return playerName, nil
-		}
-	}
-	return "", fmt.Errorf("%w: no player with address %s", errorUnknownPlayer, addr.BindString())
-}
 
 func makeAckIdConnectedPlayer(ackerPlayer, connectedPlayer string) string {
 	return fmt.Sprintf("%s_connected_to_%s", ackerPlayer, connectedPlayer)
@@ -74,18 +64,74 @@ type Admin struct {
 	aesCipher  *uknow.AESCipher
 
 	// Address of player registered on connect command
-	listenAddrOfPlayer      map[string]utils.HostPortProtocol
+	listenAddrOfPlayer map[string]utils.HostPortProtocol // TODO: Deprecate after SSE based communication is implemented
+
+	sseWriterForPlayer map[string]sseWriter
+
 	shuffler                string
 	readyPlayerName         string
-	httpClient              *http.Client
 	httpServer              *http.Server
 	logger                  *log.Logger
 	decisionEventsCompleted int
 
 	expectedAcksList *expectedAcksList
-	readlinePrompt   string
 	rl               *readline.Instance
+
+	sseControllerEventChan chan sseEvent
+	sseControllerStopChan  chan struct{}
 }
+
+type sseWriter struct {
+	responseWriter http.ResponseWriter
+}
+
+func (w *sseWriter) writeEventMessage(ctx context.Context, event messages.ServerEvent) error {
+	eventMessage := messages.ServerEventMessage{
+		Event: event,
+		Type:  event.EventType(),
+	}
+	if err := utils.WriteJsonWithNewline(w.responseWriter, eventMessage); err != nil {
+		return err
+	}
+	if flusher, ok := w.responseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	} else {
+		log.Printf("ERROR: responseWriter doesn't implement http.Flusher - needed for SSE based messages!")
+	}
+	return nil
+}
+
+// sseEvent is an interface that is implemented by all the events that
+// are sent to the SSE controller. The sseControllerEventXXX structs have name
+// corresponding to the event message structs in messages package.
+type sseEvent interface {
+	IsSseEvent()
+}
+
+type sseCommandSyncPlayerJoinedEventToAll struct {
+	NewPlayerName        string
+	ResponseWriter       http.ResponseWriter
+	NotifyControllerExit chan<- struct{}
+}
+
+func (sseCommandSyncPlayerJoinedEventToAll) IsSseEvent() {}
+
+type sseCommandSendServedCardsEventToAll struct {
+	Table uknow.Table
+}
+
+func (sseCommandSendServedCardsEventToAll) IsSseEvent() {}
+
+type sseCommandSendChosenPlayerEventToAll struct {
+}
+
+func (sseCommandSendChosenPlayerEventToAll) IsSseEvent() {}
+
+type sseCommandSyncPlayerDecisionEvent struct {
+	messages.PlayerDecisionsRequest
+}
+
+func (sseCommandSyncPlayerDecisionEvent) IsSseEvent() {}
 
 type ConfigNewAdmin struct {
 	ListenAddr      utils.HostPortProtocol
@@ -99,35 +145,43 @@ const logFilePrefix = "admin"
 func NewAdmin(config *ConfigNewAdmin, userConfig *AdminUserConfig) *Admin {
 	logger := uknow.CreateFileLogger(false, logFilePrefix)
 	admin := &Admin{
-		table:              config.Table,
-		userConfig:         userConfig,
-		listenAddrOfPlayer: make(map[string]utils.HostPortProtocol),
-		shuffler:           "",
-		aesCipher:          config.aesCipher,
-		state:              AddingPlayers,
-		expectedAcksList:   newExpectedAcksState(logger),
-		logger:             logger,
-		readyPlayerName:    config.ReadyPlayerName,
+		table:                  config.Table,
+		userConfig:             userConfig,
+		listenAddrOfPlayer:     make(map[string]utils.HostPortProtocol),
+		sseWriterForPlayer:     make(map[string]sseWriter),
+		shuffler:               "",
+		aesCipher:              config.aesCipher,
+		state:                  AddingPlayers,
+		expectedAcksList:       newExpectedAcksState(logger),
+		logger:                 logger,
+		readyPlayerName:        config.ReadyPlayerName,
+		sseControllerEventChan: make(chan sseEvent),
+		sseControllerStopChan:  make(chan struct{}),
 	}
-
-	admin.httpClient = utils.CreateHTTPClient()
 
 	r := admin.setRouterHandlers()
 
 	admin.httpServer = &http.Server{
-		Handler:      r,
-		Addr:         config.ListenAddr.BindString(),
+		Handler: r,
+		Addr:    config.ListenAddr.BindString(),
+
+		// TODO: Experiment with low-ish write timeouts - we're writing
+		// text/event-stream so the admin should have fairly long write timeouts
+		// (the duration of a game basically). Read timeouts however can be short as
+		// admin itself doesn't read any stream message.
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
-		IdleTimeout:  1 * time.Minute,
+		WriteTimeout: 10 * time.Minute,
+		IdleTimeout:  10 * time.Minute,
 	}
+
+	go admin.runSSEController()
 
 	return admin
 }
 
 func (admin *Admin) setRouterHandlers() *mux.Router {
 	r := mux.NewRouter()
-	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayer)
+	r.Path("/player").Methods("POST").HandlerFunc(admin.handleAddNewPlayerAndCreateSSE)
 	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
 	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
 	r.Path("/player_decisions").Methods("POST").HandlerFunc(admin.handlePlayerDecisionsEvent)
@@ -171,11 +225,9 @@ const allPlayersSyncCommandTimeout = time.Duration(10) * time.Second
 
 // Req:		POST /player AddNewPlayerMessage
 // Resp:	AddNewPlayerMessage
-func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
+func (admin *Admin) handleAddNewPlayerAndCreateSSE(w http.ResponseWriter, r *http.Request) {
 	admin.logger.Printf("addNewPlayer receeived from %s", r.RemoteAddr)
-
 	admin.stateMutex.Lock()
-	defer admin.stateMutex.Unlock()
 
 	if admin.state != AddingPlayers {
 		fmt.Fprintf(w, "Not accepting new players, currently in state: %s", admin.state)
@@ -183,153 +235,60 @@ func (admin *Admin) handleAddNewPlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse message
-	var msg messages.AddNewPlayersMessage
-
-	err := messages.DecryptAndDecodeJSON(&msg, r.Body, admin.aesCipher)
-	if err != nil {
+	var requestMessage messages.AddNewPlayersMessage
+	if err := messages.DecryptAndDecodeJSON(&requestMessage, r.Body, admin.aesCipher); err != nil {
+		admin.logger.Printf("failed to decode add new player request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if len(msg.ClientListenAddrs) != 1 || len(msg.PlayerNames) != 1 {
-		admin.logger.Print("Bad request. Must have exactly 1 player and the listen address in AddNewPlayerMessage")
-		w.WriteHeader(http.StatusBadRequest)
-		return
+	if len(requestMessage.PlayerNames) == 0 {
+		http.Error(w, fmt.Sprintf("Expected exactly 1 player name, got %d", len(requestMessage.PlayerNames)), http.StatusBadRequest)
 	}
 
-	newPlayerName := msg.PlayerNames[0]
-	newPlayerAdvertisedAddr := msg.ClientListenAddrs[0]
-	// Tell existing players about the new player
-	admin.logger.Printf("newPlayerName = %s, newPlayerHost = %s, newPlayerPort = %d", newPlayerName, newPlayerAdvertisedAddr.IP, newPlayerAdvertisedAddr.Port)
+	joinerPlayerName := requestMessage.PlayerNames[0]
+	utils.SetSSEResponseHeaders(w)
 
 	// Add the player to the local table. **But don't if it's already added
 	// by hand-reader - in which case check that we have this player in the
 	// table module.**
 	if admin.table.IsShuffled {
-		_, ok := admin.table.HandOfPlayer[newPlayerName]
+		_, ok := admin.table.HandOfPlayer[joinerPlayerName]
 		if !ok {
-			admin.logger.Printf("player %s has not been loaded by hand-reader. see the JSON config.", newPlayerName)
+			admin.logger.Printf("player %s has not been loaded by hand-reader. see the JSON config.", joinerPlayerName)
 			w.WriteHeader(http.StatusUnprocessableEntity)
 		}
 	} else {
-		err = admin.table.AddPlayer(newPlayerName)
+		err := admin.table.AddPlayer(joinerPlayerName)
 		if errors.Is(err, uknow.ErrPlayerAlreadyExists) {
 			w.WriteHeader(http.StatusOK)
-			admin.logger.Printf("player %s already exists", newPlayerName)
+			admin.logger.Printf("player %s already exists", joinerPlayerName)
 			return
 		}
 
 		if err != nil {
-			w.WriteHeader(http.StatusUnprocessableEntity)
+			http.Error(w, fmt.Sprintf("cannot add new player: %s", err), http.StatusUnprocessableEntity)
 			admin.logger.Printf("Cannot add new player: %s", err)
 			return
 		}
 	}
 
-	// Add the player's listen address
-	admin.listenAddrOfPlayer[newPlayerName] = newPlayerAdvertisedAddr
-	// Set it as shuffler, although it doesn't matter
-	admin.shuffler = newPlayerName
+	// Rest of the work is going to be done in the controller
+	notifyControllerExit := make(chan struct{})
 
-	// Tell existing players about new player asynchronously
-	go admin.tellExistingPlayersAboutNew(context.Background(), newPlayerName, newPlayerAdvertisedAddr.IP, newPlayerAdvertisedAddr.Port)
-
-	// Tell the new player about existing players. This is by sending AddNewPlayersMessage as a response containing the existing players info.
-	var respAddNewPlayersMessage messages.AddNewPlayersMessage
-	for playerName, playerListenAddr := range admin.listenAddrOfPlayer {
-		if playerName == newPlayerName {
-			continue
+	go func() {
+		admin.sseControllerEventChan <- sseCommandSyncPlayerJoinedEventToAll{
+			NewPlayerName:        joinerPlayerName,
+			ResponseWriter:       w,
+			NotifyControllerExit: notifyControllerExit,
 		}
+	}()
 
-		admin.logger.Printf("Telling existing player '%s' about '%s'", playerName, newPlayerName)
-		// addr, err := utils.ResolveTCPAddress(playerListenAddr.HTTPAddressString())
-		// if err != nil {
-		// 	admin.logger.Printf("Failed to resolve playerListenAddr. %s", err.Error())
-		// 	w.WriteHeader(http.StatusInternalServerError)
-		// 	messages.WriteErrorPayload(w, err)
-		// 	continue
-		// }
-		respAddNewPlayersMessage.Add(playerName, playerListenAddr.IP, playerListenAddr.Port, "http")
-
-		// Also add an expecting-ack that admin should receive from the new player for connecting to each of the existing players.
-		admin.expectedAcksList.addPending(expectedAck{ackerPlayerName: newPlayerName, ackId: makeAckIdConnectedPlayer(newPlayerName, playerName)}, 10*time.Second, func() {}, func() {
-			admin.logger.Printf("Ack timeout: new player %s could not connect to existing player %s in time", newPlayerName, playerName)
-		})
-	}
-
-	messages.EncodeJSONAndEncrypt(&respAddNewPlayersMessage, w, admin.aesCipher)
-}
-
-func (admin *Admin) tellExistingPlayersAboutNew(ctx context.Context, newPlayerName, newPlayerHost string, newPlayerPort int) {
-	// Message is same for all players. Create it.
-	var addPlayerMsg messages.AddNewPlayersMessage
-	addPlayerMsg.Add(newPlayerName, newPlayerHost, newPlayerPort, "http")
-
-	ctxForAllRequests, cancelFunc := context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
-	defer cancelFunc()
-	g, ctx := errgroup.WithContext(ctxForAllRequests)
-
-	for playerName, playerListenAddr := range admin.listenAddrOfPlayer {
-		if playerName == newPlayerName {
-			continue
-		}
-
-		playerListenAddr := playerListenAddr
-		playerName := playerName
-
-		g.Go(func() error {
-			url := playerListenAddr.HTTPAddressString() + "/players"
-			admin.logger.Printf("telling existing player %s at url %s about new player %s at url %s", playerName, playerListenAddr.HTTPAddressString(), newPlayerName, url)
-
-			var b bytes.Buffer
-			messages.EncodeJSONAndEncrypt(&addPlayerMsg, &b, admin.aesCipher)
-
-			requestSender := utils.RequestSender{
-				Client:     admin.httpClient,
-				Method:     "POST",
-				URL:        url,
-				BodyReader: &b,
-			}
-
-			resp, err := requestSender.Send(ctx)
-
-			if err != nil {
-				return err
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				admin.logger.Printf("response from existing player %s on /player: %s", playerName, resp.Status)
-				return fmt.Errorf("failed to call POST /players on player %s", playerName)
-			}
-
-			// Add an expecting-ack for this existing player. The existing player will send an ack asynchronously denoting that it has established connection with the new player
-			admin.expectedAcksList.addPending(
-				expectedAck{
-					ackId:           makeAckIdConnectedPlayer(playerName, newPlayerName),
-					ackerPlayerName: playerName,
-				},
-				5*time.Second,
-				func() {},
-				func() {
-					admin.logger.Printf("ack timeout: existing player %s could not connect to new player %s in time", playerName, newPlayerName)
-				},
-			)
-
-			admin.logger.Printf("Done telling existing player %s about new player %s at url %s, awaiting ack", playerName, newPlayerName, url)
-
-			return nil
-		})
-	}
-
-	err := g.Wait()
-
-	if err != nil {
-		admin.logger.Printf("Failed to add new player to one or more other players: %s", err)
-	}
-
-	admin.logger.Printf("listenAddrOfPlayer: %+v", admin.listenAddrOfPlayer)
-
+	admin.stateMutex.Unlock()
+	// Prevent returning from this handler until controller notifies.
+	//
+	// TODO: No notification yet. Just pauses indefinitely.
+	<-notifyControllerExit
 }
 
 func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +303,7 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Find and remove from this ack from the expectingAcks list. Don't forget to lock it first.
+	// Find and remove from this ack from the expectingAcks list.
 	ack := expectedAck{
 		ackId:           makeAckIdConnectedPlayer(reqBody.AckerPlayer, reqBody.NewPlayer),
 		ackerPlayerName: reqBody.AckerPlayer,
@@ -370,23 +329,6 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	// TODO: Ignore who calls set_ready. If this was not a toy, we would use AED
-	// (over HTTPS) to store a token in the player client after she joins. This
-	// will
-	// then be expected for each request by the player client - just like cookies.
-	//
-	// senderPlayerName, err := playerWithAddress(senderAddr,
-	// admin.listenAddrOfPlayer) if err != nil {
-	//  admin.logger.Printf("%s", err)
-	//  w.WriteHeader(http.StatusForbidden)
-	//  return
-	// }
-
-	// if admin.readyPlayerName != "" && (senderPlayerName != admin.readyPlayerName) {
-	// 	admin.logger.Printf("player %s not set as setReadyPlayer", senderPlayerName)
-	// 	w.WriteHeader(http.StatusForbidden)
-	// 	return
-	// }
 
 	admin.logger.Printf("handleSetReady: called from address: %s", senderAddr.BindString())
 
@@ -443,9 +385,12 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 		admin.table.PlayerOfLastTurn = admin.table.ShufflerName
 	}
 
-	go admin.sendServeCardsEventToAllPlayers()
-
-	w.WriteHeader(http.StatusOK)
+	// go admin.sendServeCardsEventToAllPlayers()
+	go func() {
+		admin.sseControllerEventChan <- sseCommandSendServedCardsEventToAll{
+			Table: *admin.table,
+		}
+	}()
 }
 
 // Req: POST /player_decisions_event
@@ -455,7 +400,7 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 
 	switch admin.state {
 	case WaitingForPlayerDecision:
-		var event messages.PlayerDecisionsEvent
+		var event messages.PlayerDecisionsRequest
 		err := messages.DecryptAndDecodeJSON(&event, r.Body, admin.aesCipher)
 		if err != nil {
 			admin.logger.Printf("handlePlayerDecisionsEvent: %s", err)
@@ -476,7 +421,11 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 
 		admin.expectedAcksList.chNewAckReceived <- ack
 
-		go admin.syncPlayerDecisionsEvent(event)
+		go func() {
+			admin.sseControllerEventChan <- sseCommandSyncPlayerDecisionEvent{
+				PlayerDecisionsRequest: event,
+			}
+		}()
 
 	default:
 		// DTL(@rk): What happens when the waiting player disconnects? I think anytime we stop receiving heartbeats, we should reset the admin and notify the clients that the admin is resetting.
@@ -490,36 +439,6 @@ func (admin *Admin) handlePlayerDecisionsEvent(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-}
-
-func (admin *Admin) syncPlayerDecisionsEvent(event messages.PlayerDecisionsEvent) {
-	syncEvent := &messages.PlayerDecisionsSyncEvent{
-		PlayerDecisionsEvent: event,
-	}
-
-	// Evaluate the decisions on the admin table
-	admin.stateMutex.Lock()
-	err := admin.table.EvalPlayerDecisionsNoTransferChan(syncEvent.DecidingPlayer, syncEvent.Decisions)
-	admin.setState(SyncingPlayerDecision)
-	admin.updatePromptWithStateInfo()
-
-	if err != nil {
-		admin.logger.Fatalf("ERROR while syncing decisions: %+v", err)
-	}
-
-	err = admin.sendMessageToAllPlayers(context.TODO(), syncEvent.RestPath(), &syncEvent)
-	if err != nil {
-		// TODO(@rk): Don't handle for now. Happy path only
-		admin.logger.Printf("Failed to broadcast player decisions event: %s", err)
-		return
-	}
-
-	admin.decisionEventsCompleted++
-	admin.setState(DoneSyncingPlayerDecision)
-	admin.stateMutex.Unlock()
-
-	// already inside a goroutine, so we don't need to spawn a new one for runNewTurn()
-	admin.runNewTurn()
 }
 
 func (admin *Admin) runNewTurn() {
@@ -544,127 +463,212 @@ func (admin *Admin) runNewTurn() {
 		}
 
 		admin.setState(PlayerChosenForTurn)
-		go admin.sendChosenPlayerEventToAllPlayers()
+
+		go func() {
+			admin.sseControllerEventChan <- sseCommandSendChosenPlayerEventToAll{}
+		}()
 	}
 }
 
-// Call this to broadcast the event to all players. We can essentially send any
-// []byte, but we make a decision to use this to only send event messages.
-func (admin *Admin) sendMessageToAllPlayers(ctx context.Context, eventRestPath string, requestStruct interface{}) error {
-	ctx, cancelFunc := context.WithTimeout(ctx, allPlayersSyncCommandTimeout)
-	g, ctx := errgroup.WithContext(ctx)
-	defer cancelFunc()
+func (admin *Admin) runSSEController() {
+	admin.logger.Printf("runSSEController: Starting...")
 
-	for playerName, playerAddr := range admin.listenAddrOfPlayer {
-		playerName := playerName
-		playerAddr := playerAddr
-
-		// TODO(@rk): We're copying one bytes.Buffer to another
-		// bytes.Buffer here, can we avoid? Also we need to create a new
-		// bytes.Buffer every round of the loop since we're making
-		// requests concurrently.
-		var b bytes.Buffer
-		err := messages.EncodeJSONAndEncrypt(&requestStruct, &b, admin.aesCipher)
-		if err != nil {
-			admin.logger.Fatal(err)
+	for {
+		select {
+		case <-admin.sseControllerStopChan:
+			admin.logger.Printf("runSSEController: Stopping...")
+			return
+		case ctlEvent := <-admin.sseControllerEventChan:
+			admin.logger.Printf("runSSEController: Received event: %+v, type: %T", ctlEvent, ctlEvent)
+			admin.dispatchEventWithSSE(ctlEvent)
 		}
-
-		g.Go(func() error {
-			return admin.sendMessageToPlayer(ctx, playerName, playerAddr, eventRestPath, &b)
-		})
 	}
-
-	return g.Wait()
 }
 
-func (admin *Admin) sendMessageToPlayer(
-	ctx context.Context,
-	playerName string,
-	playerAddr utils.HostPortProtocol,
-	eventRestPath string,
-	requestBodyReader io.Reader) error {
+// dispatchEventWithSSE will block until whatever it's supposed to do finishes.
+// When sender code does not want to block on a send to
+// admin.sseControllerEventChan, it should do so via a new goroutine. We are
+// actually doing just that. dispatchEventWithSSE always requires holding the
+// stateMutex so a synchronous call from a handler will deadlock.
+func (admin *Admin) dispatchEventWithSSE(ctlEvent sseEvent) {
+	switch e := ctlEvent.(type) {
+	case sseCommandSyncPlayerJoinedEventToAll:
+		func() {
+			admin.stateMutex.Lock()
+			admin.sseWriterForPlayer[e.NewPlayerName] = sseWriter{responseWriter: e.ResponseWriter}
+			admin.stateMutex.Unlock()
 
-	playerURL := fmt.Sprintf("%s/event/%s", playerAddr.HTTPAddressString(), eventRestPath)
+			ctx, cancel := context.WithTimeout(context.Background(), allPlayersSyncCommandTimeout)
+			defer cancel()
+			g, ctx := errgroup.WithContext(ctx)
 
-	admin.logger.Printf("Sending to playerURL: %s", playerURL)
+			// Send the newly joined player's name to all existing players.
+			g.Go(func() error {
+				admin.stateMutex.Lock()
+				defer admin.stateMutex.Unlock()
+				if err := admin.sendMessageToAllPlayersWithSSE(ctx, e.NewPlayerName, messages.PlayerJoinedEvent{PlayerName: e.NewPlayerName}); err != nil {
+					log.Printf("ERROR: failed to send joined player event to player: %v", err)
+					return err
+				}
+				return nil
+			})
 
-	req := utils.RequestSender{
-		Client:     admin.httpClient,
-		Method:     "POST",
-		URL:        playerURL,
-		BodyReader: requestBodyReader,
+			// Send the list of all existing players to the newly joined player.
+			g.Go(func() error {
+				admin.stateMutex.Lock()
+				defer admin.stateMutex.Unlock()
+
+				existingPlayersMsg := messages.ExistingPlayersListEvent{
+					PlayerNames: make([]string, 0, len(admin.sseWriterForPlayer)),
+				}
+				for existingPlayerName := range admin.sseWriterForPlayer {
+					existingPlayerName := existingPlayerName
+
+					if existingPlayerName == e.NewPlayerName {
+						continue
+					}
+					existingPlayersMsg.PlayerNames = append(existingPlayersMsg.PlayerNames, existingPlayerName)
+
+					// Create an expecting-ack for the newly joined player itself.
+					admin.expectedAcksList.addPending(
+						expectedAck{
+							ackId:           makeAckIdConnectedPlayer(e.NewPlayerName, existingPlayerName),
+							ackerPlayerName: e.NewPlayerName,
+						},
+						5*time.Second,
+						func() {
+							admin.logger.Printf("%s acked %s", e.NewPlayerName, existingPlayerName)
+						},
+						func() {
+							admin.logger.Printf("ack timeout: new player %s did not ack existing player %s in time", e.NewPlayerName, existingPlayerName)
+						},
+					)
+
+					// Create expecting-ack for each of the existing players also.
+					admin.expectedAcksList.addPending(
+						expectedAck{
+							ackId:           makeAckIdConnectedPlayer(existingPlayerName, e.NewPlayerName),
+							ackerPlayerName: existingPlayerName,
+						},
+						5*time.Second,
+						func() {
+							admin.logger.Printf("%s acked %s", existingPlayerName, e.NewPlayerName)
+						},
+						func() {
+							admin.logger.Printf("ack timeout: existing player %s did not ack new plater %s in time", existingPlayerName, e.NewPlayerName)
+						},
+					)
+				}
+
+				return admin.sendMessageToSinglePlayerWithSSE(ctx, e.NewPlayerName, existingPlayersMsg)
+			})
+			if err := g.Wait(); err != nil {
+				log.Printf("Failed to sync player join: %v", err)
+			}
+		}()
+
+	case sseCommandSyncPlayerDecisionEvent:
+		func() {
+			admin.stateMutex.Lock()
+			defer admin.stateMutex.Unlock()
+
+			// Evaluate the decisions on the admin table
+			err := admin.table.EvalPlayerDecisionsNoTransferChan(e.DecidingPlayer, e.Decisions)
+			if err != nil {
+				admin.logger.Printf("ERROR while evaluating decision on admin board: %v, %+v", err, e.PlayerDecisionsRequest)
+				return
+			}
+
+			// Sync the player decision with all other players
+			admin.setState(SyncingPlayerDecision)
+			admin.updatePromptWithStateInfo()
+
+			err = admin.sendMessageToAllPlayersWithSSE(context.Background(), e.PlayerDecisionsRequest.DecidingPlayer, messages.PlayerDecisionsSyncEvent{PlayerDecisionsRequest: e.PlayerDecisionsRequest})
+			if err != nil {
+				admin.logger.Printf("Failed to broadcast player decisions event: %v", err)
+				return
+			}
+
+			// TODO: Since we're using SSE, instead of HTTP request-response, we need asynchronous acking of the decisions being synced by the server.
+			admin.decisionEventsCompleted++
+			admin.setState(DoneSyncingPlayerDecision)
+			go admin.runNewTurn()
+		}()
+
+	case sseCommandSendServedCardsEventToAll:
+		func() {
+			admin.stateMutex.Lock()
+			defer admin.stateMutex.Unlock()
+			eventMsg := &messages.ServedCardsEvent{
+				Table: *admin.table,
+			}
+			if err := admin.sendMessageToAllPlayersWithSSE(context.Background(), "", eventMsg); err != nil {
+				log.Printf("ERROR: failed to send served cards event to player: %v", err)
+			}
+
+			admin.logger.Printf("Waiting %.0f seconds before sending chosen player event", pauseBeforeChoosingPlayer.Seconds())
+			<-time.After(pauseBeforeChoosingPlayer)
+
+			admin.logger.Printf("Next turn: %s", admin.table.PlayerOfNextTurn)
+
+			go func() {
+				admin.sseControllerEventChan <- sseCommandSendChosenPlayerEventToAll{}
+			}()
+		}()
+
+	case sseCommandSendChosenPlayerEventToAll:
+		func() {
+			admin.stateMutex.Lock()
+			defer admin.stateMutex.Unlock()
+			eventMsg := messages.ChosenPlayerEvent{
+				PlayerName:           admin.table.PlayerOfNextTurn,
+				DecisionEventCounter: admin.decisionEventsCompleted,
+			}
+			if err := admin.sendMessageToAllPlayersWithSSE(context.Background(), "", &eventMsg); err != nil {
+				admin.logger.Printf("sendMessageToAllPlayersWithSSE failed to send chosen player message: %v", err)
+				return
+			}
+			admin.logger.Printf("success: sent chosen player message to all players: %+v", eventMsg)
+
+			admin.setState(WaitingForPlayerDecision)
+
+			admin.expectedAcksList.addPending(
+				expectedAck{
+					ackId:           makeAckIdWaitingForPlayerDecision(eventMsg.PlayerName, admin.decisionEventsCompleted),
+					ackerPlayerName: eventMsg.PlayerName,
+				},
+				// 20*time.Second,
+				1*time.Hour,
+				func() {},
+				func() {
+					admin.logger.Printf("Ack timeout: Failed to receive player decision event from player %s", eventMsg.PlayerName)
+				},
+			)
+		}()
 	}
+}
 
-	resp, err := req.Send(ctx)
-	if err != nil {
-		return NewSendEventMessageFailedError(playerName, eventRestPath, err)
+func (admin *Admin) sendMessageToAllPlayersWithSSE(ctx context.Context, excludePlayer string, eventMsg messages.ServerEvent) error {
+	// TODO: Call in parallel. Use timeout via ctx.Done. Also, to avoid race conditions, clone the map - but it's unlikely.
+	admin.logger.Printf("sendMessageToAllPlayersWithSSE: (excluded: %s) %T %+v", excludePlayer, eventMsg, eventMsg)
+	for playerName, writer := range admin.sseWriterForPlayer {
+		if playerName == excludePlayer {
+			continue
+		}
+		if err := writer.writeEventMessage(ctx, eventMsg); err != nil {
+			return err
+		}
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return NewSendEventMessageFailedError(playerName, eventRestPath, NewHTTPResponseCodeError(resp.StatusCode))
-	}
-
 	return nil
 }
 
-func (admin *Admin) sendServeCardsEventToAllPlayers() {
-	admin.stateMutex.Lock()
-	defer admin.stateMutex.Unlock()
-
-	eventMsg := messages.ServedCardsEvent{Table: *admin.table}
-
-	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
-
-	if err != nil {
-		admin.logger.Printf("sendServeCardsEventToAllPlayers failed: %s", err)
-		return
+func (admin *Admin) sendMessageToSinglePlayerWithSSE(ctx context.Context, playerName string, eventMsg messages.ServerEvent) error {
+	admin.logger.Printf("sendMessageToSinglePlayerWithSSE: %s %T %+v", playerName, eventMsg, eventMsg)
+	writer, exists := admin.sseWriterForPlayer[playerName]
+	if !exists {
+		return uknow.ErrUnknownPlayer
 	}
-
-	admin.logger.Printf("sendServeCardsEventToAllPlayers success")
-
-	admin.setState(CardsServed)
-	go admin.sendChosenPlayerEventToAllPlayers()
-}
-
-func (admin *Admin) sendChosenPlayerEventToAllPlayers() {
-	admin.logger.Printf("Waiting %.0f seconds before sending chosen player event", pauseBeforeChoosingPlayer.Seconds())
-
-	<-time.After(pauseBeforeChoosingPlayer)
-
-	admin.logger.Printf("Next turn: %s", admin.table.PlayerOfNextTurn)
-
-	admin.stateMutex.Lock()
-	defer admin.stateMutex.Unlock()
-
-	chosenPlayer := admin.table.PlayerOfNextTurn
-
-	eventMsg := messages.ChosenPlayerEvent{
-		PlayerName:           chosenPlayer,
-		DecisionEventCounter: admin.decisionEventsCompleted,
-	}
-	err := admin.sendMessageToAllPlayers(context.TODO(), eventMsg.RestPath(), &eventMsg)
-
-	if err != nil {
-		admin.logger.Printf("sendChosenPlayerEventToAllPlayers: %s", err)
-		return
-	}
-
-	admin.logger.Printf("sendChosenPlayerEventToAllPlayers success")
-
-	admin.setState(WaitingForPlayerDecision)
-
-	admin.expectedAcksList.addPending(
-		expectedAck{
-			ackId:           makeAckIdWaitingForPlayerDecision(chosenPlayer, admin.decisionEventsCompleted),
-			ackerPlayerName: chosenPlayer,
-		},
-		// 20*time.Second,
-		1*time.Hour,
-		func() {},
-		func() {
-			admin.logger.Printf("Ack timeout: Failed to receive player decision event from player %s", chosenPlayer)
-		},
-	)
+	return writer.writeEventMessage(ctx, eventMsg)
 }
 
 func (admin *Admin) setReady() {

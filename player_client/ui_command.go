@@ -3,7 +3,7 @@ package client
 import (
 	"time"
 
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 // These are commands that the ClientUI _receives_ from the PlayerClient.
