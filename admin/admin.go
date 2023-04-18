@@ -17,10 +17,10 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/gorilla/mux"
-	"github.com/rksht/uknow"
-	"github.com/rksht/uknow/hand_reader"
-	"github.com/rksht/uknow/internal/messages"
-	"github.com/rksht/uknow/internal/utils"
+	"github.com/nrawrx3/uknow"
+	"github.com/nrawrx3/uknow/hand_reader"
+	"github.com/nrawrx3/uknow/internal/messages"
+	"github.com/nrawrx3/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
 

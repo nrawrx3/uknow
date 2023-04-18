@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/scanner"
 
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 const (

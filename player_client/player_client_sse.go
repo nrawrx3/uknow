@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	messages "github.com/rksht/uknow/internal/messages"
-	utils "github.com/rksht/uknow/internal/utils"
+	messages "github.com/nrawrx3/uknow/internal/messages"
+	utils "github.com/nrawrx3/uknow/internal/utils"
 )
 
 func (c *PlayerClient) sseController(response *http.Response) {

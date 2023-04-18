@@ -1,4 +1,4 @@
-module github.com/rksht/uknow
+module github.com/nrawrx3/uknow
 
 go 1.19
 

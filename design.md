@@ -190,4 +190,4 @@ Deployment should be done via a script.
 
 ## BUGS
 
-http: superfluous response.WriteHeader call from github.com/rksht/uknow/admin.(*Admin).handleAddNewPlayer (admin.go:171)
+http: superfluous response.WriteHeader call from github.com/nrawrx3/uknow/admin.(*Admin).handleAddNewPlayer (admin.go:171)

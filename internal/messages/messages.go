@@ -9,8 +9,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/rksht/uknow"
-	"github.com/rksht/uknow/internal/utils"
+	"github.com/nrawrx3/uknow"
+	"github.com/nrawrx3/uknow/internal/utils"
 )
 
 type AddNewPlayersMessage struct {

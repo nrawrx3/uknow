@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/nrawrx3/uknow"
+	messages "github.com/nrawrx3/uknow/internal/messages"
+	utils "github.com/nrawrx3/uknow/internal/utils"
 	"github.com/pkg/errors"
-	"github.com/rksht/uknow"
-	messages "github.com/rksht/uknow/internal/messages"
-	utils "github.com/rksht/uknow/internal/utils"
 	"golang.org/x/sync/errgroup"
 )
 

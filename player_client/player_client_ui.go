@@ -10,7 +10,7 @@ import (
 
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
-	"github.com/rksht/uknow"
+	"github.com/nrawrx3/uknow"
 )
 
 //go:generate stringer -type=UIAction
