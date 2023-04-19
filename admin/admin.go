@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -47,6 +48,10 @@ const (
 
 func makeAckIdConnectedPlayer(ackerPlayer, connectedPlayer string) string {
 	return fmt.Sprintf("%s_connected_to_%s", ackerPlayer, connectedPlayer)
+}
+
+func makeAckIdOfDecisionSyncPlayer(ackerPlayer string, decisionCounter int) string {
+	return fmt.Sprintf("%s_synced_%d", ackerPlayer, decisionCounter)
 }
 
 func makeAckIdWaitingForPlayerDecision(ackerPlayer string, decisionCounter int) string {
@@ -185,6 +190,7 @@ func (admin *Admin) setRouterHandlers() *mux.Router {
 	r.Path("/ack_player_added").Methods("POST").HandlerFunc(admin.handleAckNewPlayerAdded)
 	r.Path("/set_ready").Methods("POST").HandlerFunc(admin.handleSetReady)
 	r.Path("/player_decisions").Methods("POST").HandlerFunc(admin.handlePlayerDecisionsEvent)
+	r.Path("/ack-decision-sync").Methods("POST").HandlerFunc(admin.handleAckPlayerDecisionSynced)
 	r.Path("/test_command").Methods("POST")
 	utils.RoutesSummary(r, admin.logger)
 	return r
@@ -315,6 +321,23 @@ func (admin *Admin) handleAckNewPlayerAdded(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 }
 
+func (admin *Admin) handleAckPlayerDecisionSynced(w http.ResponseWriter, r *http.Request) {
+	var reqBody messages.AckSyncedPlayerDecisionsMesasge
+	if err := messages.DecryptAndDecodeJSON(&reqBody, r.Body, admin.aesCipher); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		messages.WriteErrorPayload(w, err)
+		return
+	}
+
+	ack := expectedAck{
+		ackId:           makeAckIdOfDecisionSyncPlayer(reqBody.AckerPlayer, reqBody.DecisionCounter),
+		ackerPlayerName: reqBody.AckerPlayer,
+	}
+
+	admin.expectedAcksList.chNewAckReceived <- ack
+	w.WriteHeader(http.StatusOK)
+}
+
 // Req: POST /set_ready SetReadyMessage
 //
 // Resp: StatusForbidden
@@ -382,7 +405,6 @@ func (admin *Admin) handleSetReady(w http.ResponseWriter, r *http.Request) {
 
 	if setReadyMessage.ShufflerIsFirstPlayer {
 		admin.table.PlayerOfNextTurn = admin.table.ShufflerName
-		admin.table.PlayerOfLastTurn = admin.table.ShufflerName
 	}
 
 	// go admin.sendServeCardsEventToAllPlayers()
@@ -589,10 +611,38 @@ func (admin *Admin) dispatchEventWithSSE(ctlEvent sseEvent) {
 				return
 			}
 
-			// TODO: Since we're using SSE, instead of HTTP request-response, we need asynchronous acking of the decisions being synced by the server.
-			admin.decisionEventsCompleted++
-			admin.setState(DoneSyncingPlayerDecision)
-			go admin.runNewTurn()
+			var remainingAcksBeforeDoneSyncing atomic.Int32
+			remainingAcksBeforeDoneSyncing.Store(int32(len(admin.sseWriterForPlayer)) - 1)
+
+			// Since we're using SSE, instead of HTTP request-response, we need asynchronous acking of the decisions being synced by the server.
+			for playerName := range admin.sseWriterForPlayer {
+				if playerName == e.DecidingPlayer {
+					continue
+				}
+				admin.expectedAcksList.addPending(
+					expectedAck{
+						ackId:           makeAckIdOfDecisionSyncPlayer(playerName, e.DecisionEventCounter),
+						ackerPlayerName: playerName,
+					},
+					5*time.Second,
+					func() {
+						admin.logger.Printf("%s acked decision %d", playerName, e.DecisionEventCounter)
+						if remainingAcksBeforeDoneSyncing.Add(-1) == 0 {
+							admin.stateMutex.Lock()
+							admin.setState(DoneSyncingPlayerDecision)
+							admin.decisionEventsCompleted++
+							admin.stateMutex.Unlock()
+							go admin.runNewTurn()
+						}
+					},
+					func() {
+						admin.logger.Printf("ack timeout: existing player %s did not ack decision %d in time", playerName, e.DecisionEventCounter)
+					},
+				)
+			}
+
+			// admin.setState(DoneSyncingPlayerDecision)
+			// go admin.runNewTurn()
 		}()
 
 	case sseCommandSendServedCardsEventToAll:

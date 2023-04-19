@@ -63,6 +63,7 @@ type PlayerClient struct {
 	// player's address to confirm that it can connect. This also creates a
 	// connection to this client in http.Transport used by the PlayerClient.
 	httpClient         *http.Client
+	httpClientQuick    *http.Client
 	neighborListenAddr map[string]utils.HostPortProtocol
 	adminAddr          utils.HostPortProtocol
 	advertiseIP        string
@@ -91,6 +92,7 @@ func NewPlayerClient(config *ConfigNewPlayerClient) *PlayerClient {
 		table:              config.Table,
 		clientState:        WaitingToConnectToAdmin,
 		httpClient:         utils.CreateHTTPClient(10 * time.Minute),
+		httpClientQuick:    utils.CreateHTTPClient(1 * time.Minute),
 		neighborListenAddr: make(map[string]utils.HostPortProtocol),
 		ClientChannels:     config.ClientChannels,
 		Logger:             uknow.CreateFileLogger(false, config.Table.LocalPlayerName),
@@ -703,4 +705,36 @@ func (c *PlayerClient) connectToAdminAndStartSSEController(ctx context.Context, 
 	case http.StatusOK:
 		c.sseController(resp)
 	}
+}
+
+func (client *PlayerClient) ackPlayerSyncToAdmin(ctx context.Context, decisionCounter int) error {
+	url := fmt.Sprintf("%s/ack-decision-sync", client.adminAddr.HTTPAddressString())
+
+	ackMessage := messages.AckSyncedPlayerDecisionsMesasge{
+		AckerPlayer:     client.table.LocalPlayerName,
+		DecisionCounter: decisionCounter,
+	}
+	// client.httpClientQuick.
+	var requestBody bytes.Buffer
+	if err := messages.EncodeJSONAndEncrypt(&ackMessage, &requestBody, client.aesCipher); err != nil {
+		client.logToWindow("failed to player decision event: %d", decisionCounter)
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, &requestBody)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.httpClientQuick.Do(req)
+	if err != nil {
+		client.logToWindow("failed to call ack-decision-sync on admin: %v", err)
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("failed to call ack-decision-sync on admin, received response: %d", resp.StatusCode)
+		return errors.New("failed to call ack-decision-sync on admin")
+	}
+	return nil
 }

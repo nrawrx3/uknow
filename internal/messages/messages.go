@@ -41,6 +41,11 @@ type AckNewPlayerAddedMessage struct {
 	NewPlayer   string `json:"new_player"`
 }
 
+type AckSyncedPlayerDecisionsMesasge struct {
+	AckerPlayer     string `json:"acker_player"`
+	DecisionCounter int    `json:"decision_counter"`
+}
+
 // Sent by admin to all players
 type SetReadyMessage struct {
 	ShufflerName          string `json:"shuffler_name"`
