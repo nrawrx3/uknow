@@ -476,7 +476,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 				clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorBlue
 				clientUI.commandPromptCell.TextStyle.Fg = ui.ColorBlue
-				clientUI.drawDeckGauge.BarColor = ui.ColorBlue
+				// clientUI.drawDeckGauge.BarColor = ui.ColorBlue
 				clientUI.commandPromptCell.Title = "Your turn now"
 			})
 
@@ -501,13 +501,13 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 
 						go func() {
 							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
-								clientUI.drawDeckGauge.BarColor = ui.ColorRed
+								// clientUI.drawDeckGauge.BarColor = ui.ColorRed
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorRed
 
 							})
 							<-time.After(2 * time.Second)
 							clientUI.notifyRedrawUI(uiRedrawGrid, func() {
-								clientUI.drawDeckGauge.BarColor = ui.ColorBlue
+								// clientUI.drawDeckGauge.BarColor = ui.ColorBlue
 								clientUI.eventLogCell.BorderStyle.Fg = ui.ColorWhite
 							})
 						}()
@@ -532,7 +532,7 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 					clientUI.notifyRedrawUI(uiRedrawGrid, func() {
 						clientUI.commandPromptCell.Block.BorderStyle.Fg = ui.ColorRed
 						clientUI.commandPromptCell.TextStyle.Fg = ui.ColorWhite
-						clientUI.drawDeckGauge.BarColor = ui.ColorWhite
+						// clientUI.drawDeckGauge.BarColor = ui.ColorWhite
 						clientUI.commandPromptCell.Title = defaultCommandPromptCellTitle
 					})
 				}
@@ -548,6 +548,11 @@ func (clientUI *ClientUI) RunPollInputEvents(playerName string) {
 func (clientUI *ClientUI) RunGameEventProcessor(localPlayerName string) {
 	for event := range clientUI.GameEventPullChan {
 		switch event := event.(type) {
+		case uknow.RequiredColorUpdatedEvent:
+			clientUI.notifyRedrawUI(uiRedrawGrid, func() {
+				clientUI.drawDeckGauge.BarColor = uiColorOfCard(event.NewColor)
+			})
+
 		case uknow.CardTransferEvent:
 			// clientUI.Logger.Printf("received")
 

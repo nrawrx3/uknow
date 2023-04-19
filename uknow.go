@@ -374,12 +374,18 @@ func (t *Table) SetPlayerOfNextTurn(nextPlayer string) {
 	t.PlayerOfNextTurn = nextPlayer
 }
 
-func (t *Table) SetRequiredColor(newColor Color) {
+func (t *Table) SetRequiredColor(newColor Color, gameEventPushChan chan<- GameEvent) {
 	t.RequiredColorOfLastTurn = t.RequiredColorOfCurrentTurn
 	t.RequiredColorOfCurrentTurn = newColor
 
 	t.Logger.Printf("RequiredColorOfLastTurn: %v", t.RequiredColorOfLastTurn)
 	t.Logger.Printf("RequiredColorOfCurrentTurn: %v", t.RequiredColorOfCurrentTurn)
+
+	if gameEventPushChan != nil {
+		gameEventPushChan <- RequiredColorUpdatedEvent{
+			NewColor: newColor,
+		}
+	}
 }
 
 func (t *Table) SetRequiredNumber(newNumber Number) {
@@ -575,9 +581,9 @@ func (t *Table) ShuffleDeckAndDistribute(startingHandCount int) {
 
 	if topCard.IsWild() {
 		// TODO(@rk): Make player choose the color if wild
-		t.SetRequiredColor(ColorRed)
+		t.SetRequiredColor(ColorRed, nil)
 	} else {
-		t.SetRequiredColor(topCard.Color)
+		t.SetRequiredColor(topCard.Color, nil)
 	}
 
 	indexOfNextPlayer := t.GetNextPlayerIndex(t.IndexOfPlayer[t.ShufflerName], 1)
@@ -738,7 +744,7 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrUnexpectedDecision}
 		}
 
-		t.SetRequiredColor(decision.WildCardChosenColor)
+		t.SetRequiredColor(decision.WildCardChosenColor, gameEventPushChan)
 
 		t.Logger.Printf("Setting required color to wild card chosen color %s, previous color: %s", decision.WildCardChosenColor.String(), t.RequiredColorOfLastTurn.String())
 
@@ -925,7 +931,7 @@ func (t *Table) tryPlayCard(decidingPlayer string, cardToPlay Card, gameEventPus
 		// TODO(@rk): Better to handle in a separate function for all non-action card plays.
 		t.setNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
 		t.TableState = StartOfTurn
-		t.SetRequiredColor(cardToPlay.Color)
+		t.SetRequiredColor(cardToPlay.Color, gameEventPushChan)
 		t.SetRequiredNumber(cardToPlay.Number)
 	}
 
@@ -956,7 +962,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 	case NumberSkip:
 		skippedPlayer, nextPlayer := t.setNextPlayerSkipOne(decidingPlayer)
 		t.TableState = StartOfTurn
-		t.SetRequiredColor(actionCard.Color)
+		t.SetRequiredColor(actionCard.Color, gameEventPushChan)
 		t.SetRequiredNumber(actionCard.Number)
 
 		event := SkipCardActionEvent{
@@ -973,7 +979,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 	case NumberDrawTwo:
 		skippedPlayer, nextPlayer := t.setNextPlayerSkipOne(decidingPlayer)
 		t.TableState = StartOfTurn
-		t.SetRequiredColor(actionCard.Color)
+		t.SetRequiredColor(actionCard.Color, gameEventPushChan)
 		t.SetRequiredNumber(actionCard.Number)
 
 		event := DrawTwoCardActionEvent{
@@ -1008,7 +1014,7 @@ func (t *Table) evalPlayedActionCard(decidingPlayer string, actionCard Card, gam
 		t.SetPlayerOfNextTurn(t.PlayerNames[nextPlayerIndex])
 		deniedPlayer := t.PlayerNames[deniedPlayerIndex]
 		t.TableState = StartOfTurn
-		t.SetRequiredColor(actionCard.Color)
+		t.SetRequiredColor(actionCard.Color, gameEventPushChan)
 		t.SetRequiredNumber(actionCard.Number)
 
 		event := ReverseCardActionEvent{

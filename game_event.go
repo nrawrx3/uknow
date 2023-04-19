@@ -304,3 +304,19 @@ func (e PlayerHasWonEvent) FromLocalClient() bool {
 func (e PlayerHasWonEvent) GameEventName() string {
 	return "PlayerHasWonEvent"
 }
+
+type RequiredColorUpdatedEvent struct {
+	NewColor Color
+}
+
+func (e *RequiredColorUpdatedEvent) StringMessage(localPlayerName string) string {
+	return "Color of turn: " + e.NewColor.String()
+}
+
+func (e RequiredColorUpdatedEvent) FromLocalClient() bool {
+	return false
+}
+
+func (e RequiredColorUpdatedEvent) GameEventName() string {
+	return "RequiredColorUpdatedEvent"
+}
