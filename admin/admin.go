@@ -682,6 +682,7 @@ func (admin *Admin) dispatchEventWithSSE(ctlEvent sseEvent) {
 
 			admin.setState(WaitingForPlayerDecision)
 
+			// TODO: We should also wait for acks from each of the player to note the admin they processed the chosen player event.
 			admin.expectedAcksList.addPending(
 				expectedAck{
 					ackId:           makeAckIdWaitingForPlayerDecision(eventMsg.PlayerName, admin.decisionEventsCompleted),

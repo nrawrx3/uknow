@@ -820,6 +820,13 @@ func (t *Table) EvalPlayerDecision(decidingPlayer string, decision PlayerDecisio
 			return decision, &EvalDecisionError{Decision: decision, Reason: ErrUnexpectedDecision}
 		}
 
+		for i := 0; i < 4; i++ {
+			_, err := t.pullCardFromDeckToPlayerHand(decidingPlayer, gameEventPushChan, decidingPlayer == t.LocalPlayerName)
+			if err != nil {
+				return decision, err
+			}
+		}
+
 		t.setNeighborAsNextPlayer(decidingPlayer, StartOfTurn)
 	}
 
