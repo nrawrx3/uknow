@@ -131,6 +131,8 @@ func (c *PlayerClient) sseController(response *http.Response) {
 				c.Logger.Printf("Evaluating player_decisions_sync, deciding player: %s, decisions count: %d, decisions: %+v, COUNTER: %d", ev.DecidingPlayer, len(ev.Decisions), ev.Decisions, ev.DecisionEventCounter)
 				c.table.EvalPlayerDecisions(ev.DecidingPlayer, ev.Decisions, c.GameEventPushChan)
 
+				c.ackPlayerSyncToAdmin(context.Background(), ev.DecisionEventCounter)
+
 				c.clientState = WaitingForAdminToChoosePlayer
 				c.Logger.Printf("Done evaluating player %s's %d decisions, COUNTER: %d", ev.DecidingPlayer, len(ev.Decisions), ev.DecisionEventCounter)
 			}()
